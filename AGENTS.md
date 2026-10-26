@@ -26,6 +26,12 @@ Bumping `version.txt` ahead of the rebuilt exe makes every client "update" to th
 stale bytes already in `dist/`. If you bump `version.txt` in a source-only change,
 flag clearly that the exe must be rebuilt before the release is merged/shipped.
 
+## Branching
+
+Work directly on the default branch (`master`). Do **not** create feature branches
+or open PRs for routine changes — commit straight to `master`. (This overrides the
+general "one branch + one PR per change" workflow for this repo.)
+
 ## Commits
 
 Commits are GPG-signed by the maintainer. Prepare the working tree and hand over the
