@@ -7,6 +7,7 @@ Limits Albion Online playtime for kids:
 - Automatically closes game when time is up
 - Blocks reopening until next day (midnight)
 - **Browser block: Chrome/Edge/Firefox/Brave/Opera etc. are auto-closed**
+- **Scheduled browser exception: browsers are allowed Tuesdays 08:00–13:30 (school IT class)**
 - **Not closable by kids:** close button disabled, Ctrl+C ignored, auto-restarts if killed, runs as SYSTEM when possible
 - **Parent hotkeys: `Ctrl+Alt+T` +15 min, `Ctrl+Shift+D` DISABLE app** (resets tomorrow / creates disabled flag)
 
@@ -25,11 +26,14 @@ Limits Albion Online playtime for kids:
 
 | File | Description |
 |------|-------------|
-| `albion_limiter.py` | Main service — polling + hotkey + auto-update |
+| `albion_limiter.py` | Main service — polling + hotkey + auto-update + log/status shipping |
 | `dist/PlayLimit.exe` | Latest compiled executable (auto-updated on launch) |
 | `install.ps1` | Installer (run as Administrator) |
 | `install.bat` | Batch wrapper for installer |
 | `uninstall.ps1` | Uninstaller (run as Administrator) |
+| `monitor/dashboard.html` | Remote monitoring dashboard — open locally in a browser |
+| `test_matcher.py` | Game-detection matcher tests |
+| `test_basic.py` | Unit tests: limits, state, sessions, status, logging |
 | `README.txt` | Plain-text docs |
 
 ## Auto-Update (self-replacing exe, no admin needed)
@@ -61,6 +65,12 @@ git commit -m "v1.4.0 ..."
 git push
 ```
 `version.txt` must contain the new version (e.g. `1.4.0`) or clients will not pick it up.
+
+> **Versioning policy (see `AGENTS.md`):** bump the version on *every* change —
+> `__version__`, `version_info.txt`, and `version.txt` in lockstep. All are now at
+> `1.7.0`. **Before releasing/merging a `version.txt` bump you must rebuild**
+> `dist/PlayLimit.exe` + `dist/PlayLimit.exe.sha256` on Windows and commit them in
+> the same change — otherwise clients "update" to the stale exe still in `dist/`.
 
 ## Installation (none needed — just open the exe)
 
@@ -101,7 +111,22 @@ WEEKEND_LIMIT_SEC = 120 * 60  # Fri-Sun (shared budget, Friday counts as weekend
 WARNING_BEFORE_SEC = 5 * 60  # popup at 5 min left
 BONUS_STEP_SEC = 15 * 60     # per Ctrl+Alt+T
 BROWSER_PROCESSES = ["chrome.exe","msedge.exe","firefox.exe","brave.exe",...]
+
+# Recurring windows where browser blocking is PAUSED (browsers may stay open).
+# Games are still limited/counted as normal. (weekday, start, end, reason)
+# weekday: Monday=0 ... Sunday=6
+BROWSER_ALLOW_WINDOWS = [
+    # Tuesday IT class at school - the child needs a browser for schoolwork
+    # between 08:00 and 13:30, so browser blocking is paused then.
+    (1, "08:00", "13:30", "School IT class (Tuesday 08:00-13:30)"),
+]
 ```
+
+**Scheduled browser exceptions** (`BROWSER_ALLOW_WINDOWS`): during a listed window
+`is_browser_running()`/`kill_browsers()` return early so browsers are left open.
+The active window's reason is shown on the machine's card in the dashboard
+(“browser allowed now”) and in `status.json` (`browser_allow_reason`). Add more
+tuples to allow other days/times; the window is `[start, end)` (end-exclusive).
 
 ## Other Overrides
 
@@ -146,6 +171,75 @@ Warning is a Windows MessageBox — if game is fullscreen it may be behind the g
 
 - State: `C:\ProgramData\AlbionLimiter\state.json`
 - Log: `C:\ProgramData\AlbionLimiter\limiter.log`
+- Status heartbeat: `C:\ProgramData\AlbionLimiter\status.json`
+
+### Logging (v1.7.0+)
+
+Every log line now carries a severity level:
+
+```
+[2026-10-24 14:03:24] [INFO] Playing... 20m / 120m used, 1h 40m remaining
+[2026-10-24 14:05:01] [WARN] LogShip: PUT status/PC-01.json HTTP 409 ...
+[2026-10-24 14:05:02] [ERROR] UNCAUGHT exception in thread 'HotkeyListener'
+Traceback (most recent call last): ...
+```
+
+- `INFO` — normal activity (the historic log lines).
+- `WARN` — recoverable problems (failed upload, missing psutil, etc.).
+- `ERROR` — failures, **including any uncaught exception** in the main loop or a
+  worker thread (a global `sys.excepthook` + `threading.excepthook` route crashes
+  to the log with a full traceback, so nothing dies silently).
+
+The last 50 WARN/ERROR lines are also kept in memory and surfaced in `status.json`
+(`recent_issues`) so the dashboard can show recent problems without the full log.
+
+### `status.json` (machine-readable heartbeat)
+
+Written atomically every poll (and on startup/shutdown) for the monitor:
+
+```json
+{
+  "schema": 1,
+  "host": "PC-01", "user": "ethan", "version": "1.7.0",
+  "heartbeat": "2026-10-24T14:03:24", "heartbeat_epoch": 1792161804, "uptime_sec": 5400,
+  "date": "2026-10-24", "weekend": true,
+  "base_limit_sec": 7200, "bonus_sec": 900, "limit_sec": 8100,
+  "used_sec": 1234, "remaining_sec": 6866,
+  "disabled": false, "blocked": false, "warned": false,
+  "playing": true, "games_running": ["albion-online.exe"],
+  "sessions": [{ "game": "albion-online.exe", "start": "14:00", "end": null, "user": "ethan" }],
+  "psutil": true, "browser_block": true, "browser_allow_reason": null,
+  "recent_issues": [{ "ts": "...", "level": "WARN", "msg": "..." }],
+  "error_count": 0, "warn_count": 1,
+  "today": { "total_sec": 1234, "per_game": { "albion-online.exe": 1234 }, "per_user": { "ethan": 1234 } },
+  "week": {
+    "total_sec": 18000,
+    "per_game": { "albion-online.exe": 12000, "(browser)": 4200, "roblox": 1800 },
+    "per_user": { "ethan": 15000, "mia": 3000 },
+    "days": [{ "date": "2026-10-18", "total_sec": 3600, "per_game": { "roblox": 3600 } }]
+  }
+}
+```
+
+### `history.json` (rolling per-day usage)
+
+A separate file (not reset at midnight) accumulates the last ~35 days of usage so
+the monitor can draw daily/weekly summaries:
+
+```json
+{ "days": { "2026-10-24": { "total_sec": 5400,
+    "per_game": { "albion-online.exe": 3600, "roblox": 1800, "(browser)": 900 },
+    "per_user": { "ethan": 5400 } } } }
+```
+
+- **Game time** is credited while actually playing (under the limit).
+- **Browser time** (`"(browser)"`) is credited whenever a browser is open during an
+  allow-window / on an exempt PC — so school-IT browsing shows up in the charts.
+- **`per_user`** is the OS username at the time (per-machine state is shared, but
+  the active user is attributed to the time credited).
+
+`status.json` embeds today's buckets (`today`) and a 7-day rollup (`week`) so the
+dashboard needs only the per-machine status file for its summaries.
 
 Example `state.json`:
 ```json
@@ -159,11 +253,52 @@ Example `state.json`:
 ```
 `bonus_seconds` = extra time added today via `Ctrl+Alt+T`.
 
+## Remote Monitoring Dashboard (v1.7.0+)
+
+`monitor/dashboard.html` is a **single self-contained page** (no server, no build
+step) that shows every machine's live status by reading the private logs repo
+directly in your browser.
+
+**Open it:** double-click `monitor/dashboard.html` (or host it anywhere static).
+On first run it asks for:
+- the logs repo (`beukes2/playlimit-logs`), and
+- a GitHub **fine-grained, read-only** token (Contents → **Read-only**, scoped to
+  **only** the logs repo). This is different from the machines' write token — the
+  dashboard never needs write access. The token is stored only in that browser's
+  `localStorage` and is sent only to `api.github.com`.
+
+**Overview (top of the page):**
+- **Today — per host & user:** a table of time used today per machine and per OS
+  user, with an all-machines total.
+- **This week — by game / browser / app:** horizontal bars of time per game (and a
+  `🌐 Browser` bucket), summed across all machines over the last 7 days.
+- **This week — total per day:** a 7-column bar chart of total time per day (today
+  highlighted).
+
+**Per machine:**
+- Live badge: **Playing / Idle / Blocked / Disabled / Offline** (offline = no
+  heartbeat for ~6 min).
+- Used-vs-limit progress bar, remaining time, bonus, weekday/weekend.
+- Heartbeat age + uptime, current user, running games, and flags
+  (`browser block on/off`, a `browser allowed now` pill during a scheduled
+  exception, `psutil`, error/warn counts).
+- Today's session timeline and the most recent WARN/ERROR lines.
+- A **View full log** button that pulls that day's `logs/<host>-<date>.log`.
+
+Auto-refreshes (default 30 s). Because machines ship `status.json` every ~2 min,
+the dashboard is near-live; the full log tail still ships every 10 min.
+
+**Try it with no setup:** open `monitor/dashboard.html?demo=1` to see the layout
+rendered with three sample machines (playing / blocked / offline) — no repo or
+token needed. Handy for a quick look or for testing UI changes.
+
 ## Remote Logs (read all machines from this PC)
 
 Every running copy (v1.4.1+) uploads its log to the **private** repo
 `beukes2/playlimit-logs` under `logs/<HOSTNAME>-<date>.log` — first upload ~60s
-after start, then every 10 min. Read them from this PC with:
+after start, then every 10 min. Since **v1.7.0** each copy also ships a
+machine-readable heartbeat to `status/<HOSTNAME>.json` every ~2 min (this is what
+the dashboard reads). Read the logs from this PC with:
 ```powershell
 gh repo clone beukes2/playlimit-logs "$env:TEMP\playlimit-logs" 2>$null
 Get-ChildItem "$env:TEMP\playlimit-logs\logs" | Sort-Object LastWriteTime -Descending
@@ -177,6 +312,19 @@ Setup (parent does this once per machine — the token is NEVER in the repo/exe)
 3. As Admin on the machine, save it (no extra spaces/newlines) to `C:\ProgramData\AlbionLimiter\github_token.txt`
 4. Restart PlayLimit — log shows `LogShip: token found`, next upload within ~60s
 5. No token file = shipping silently off. The token can only touch the logs repo, nothing else.
+
+## Tests
+
+Pure-Python, run on any OS (they redirect state to a temp dir, never touching
+`ProgramData`):
+
+```bash
+python3 -m unittest test_basic -v   # limits, state + sanitization, sessions, status, logging
+python3 test_matcher.py             # game-detection matcher contract
+```
+
+The dashboard has a demo mode for a quick visual check — open
+`monitor/dashboard.html?demo=1` in any browser.
 
 ## Troubleshooting
 

@@ -1,0 +1,561 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>PlayLimit Monitor</title>
+<style>
+  :root {
+    --bg: #0f1420; --panel: #171e2e; --panel2: #1e2740; --line: #2a3450;
+    --txt: #e6ebf5; --muted: #8b97b4; --accent: #5b8cff;
+    --green: #35c66b; --blue: #4aa3ff; --amber: #f2b705; --red: #ff5d5d; --grey: #6b7694;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--txt);
+    font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  header {
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+    padding: 14px 20px; background: var(--panel); border-bottom: 1px solid var(--line);
+    position: sticky; top: 0; z-index: 10;
+  }
+  header h1 { font-size: 18px; margin: 0; letter-spacing: .3px; }
+  header h1 span { color: var(--accent); }
+  .spacer { flex: 1; }
+  .meta { color: var(--muted); font-size: 12px; }
+  button, input {
+    font: inherit; color: var(--txt); background: var(--panel2);
+    border: 1px solid var(--line); border-radius: 8px; padding: 7px 11px;
+  }
+  button { cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  input { min-width: 180px; }
+  main { padding: 20px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 16px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+    padding: 16px; display: flex; flex-direction: column; gap: 12px;
+  }
+  .card.stale { opacity: .72; }
+  .card-top { display: flex; align-items: center; gap: 10px; }
+  .host { font-size: 16px; font-weight: 700; }
+  .ver { color: var(--muted); font-size: 12px; }
+  .badge {
+    margin-left: auto; font-size: 12px; font-weight: 700; padding: 4px 10px;
+    border-radius: 999px; white-space: nowrap;
+  }
+  .b-play { background: rgba(53,198,107,.16); color: var(--green); }
+  .b-idle { background: rgba(74,163,255,.16); color: var(--blue); }
+  .b-block { background: rgba(255,93,93,.16); color: var(--red); }
+  .b-disabled { background: rgba(107,118,148,.2); color: var(--grey); }
+  .b-offline { background: rgba(255,93,93,.14); color: var(--red); border: 1px dashed var(--red); }
+  .bar { height: 10px; background: var(--panel2); border-radius: 999px; overflow: hidden; }
+  .bar > i { display: block; height: 100%; border-radius: 999px; transition: width .4s ease; }
+  .time-line { display: flex; justify-content: space-between; align-items: baseline; }
+  .big { font-size: 22px; font-weight: 800; }
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 13px; }
+  .kv b { color: var(--muted); font-weight: 500; }
+  .pill { font-size: 11px; padding: 2px 8px; border-radius: 6px; background: var(--panel2); color: var(--muted); }
+  .pill.on { color: var(--green); } .pill.off { color: var(--grey); }
+  .section-t { font-size: 12px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); margin: 2px 0; }
+  .sessions, .issues { display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; }
+  .srow { display: flex; gap: 8px; }
+  .srow .g { font-weight: 600; min-width: 90px; }
+  .srow .t { color: var(--muted); }
+  .srow .live { color: var(--green); font-weight: 700; }
+  .issue { font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; }
+  .issue.ERROR { color: var(--red); } .issue.WARN { color: var(--amber); }
+  .card-actions { display: flex; gap: 8px; }
+  .card-actions button { flex: 1; font-size: 12px; padding: 6px; }
+  .empty, .msg { color: var(--muted); padding: 40px; text-align: center; }
+  .msg.err { color: var(--red); }
+  dialog {
+    background: var(--panel); color: var(--txt); border: 1px solid var(--line);
+    border-radius: 14px; width: min(900px, 92vw); max-height: 82vh; padding: 0;
+  }
+  dialog::backdrop { background: rgba(0,0,0,.6); }
+  .dlg-head { display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+  .dlg-head b { flex: 1; }
+  dialog pre { margin: 0; padding: 16px; overflow: auto; max-height: 68vh; font: 12px/1.5 ui-monospace, Menlo, monospace; white-space: pre-wrap; }
+  .setup { max-width: 560px; margin: 8vh auto; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 26px; }
+  .setup h2 { margin-top: 0; }
+  .setup label { display: block; margin: 14px 0 4px; color: var(--muted); font-size: 13px; }
+  .setup input { width: 100%; }
+  .setup .hint { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  .setup ol { color: var(--muted); font-size: 12.5px; padding-left: 18px; }
+  code { background: var(--panel2); padding: 1px 5px; border-radius: 5px; }
+  a { color: var(--accent); }
+
+  /* ---- overview (daily summary + weekly charts) ---- */
+  .overview { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; margin-bottom: 20px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 16px; }
+  .panel h3 { margin: 0 0 12px; font-size: 13px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); font-weight: 600; }
+  .panel h3 small { text-transform: none; letter-spacing: 0; font-weight: 400; }
+  .sumtable { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .sumtable th { text-align: left; color: var(--muted); font-weight: 500; padding: 4px 8px; border-bottom: 1px solid var(--line); }
+  .sumtable td { padding: 5px 8px; border-bottom: 1px solid var(--panel2); }
+  .sumtable td.num { text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
+  .sumtable tr:last-child td { border-bottom: none; }
+  .hbars { display: flex; flex-direction: column; gap: 8px; }
+  .hbar { display: grid; grid-template-columns: 120px 1fr auto; align-items: center; gap: 10px; font-size: 12.5px; }
+  .hbar .lbl { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .hbar .track { height: 14px; background: var(--panel2); border-radius: 999px; overflow: hidden; }
+  .hbar .fill { height: 100%; border-radius: 999px; background: var(--accent); min-width: 2px; }
+  .hbar .val { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .cols { display: flex; align-items: flex-end; gap: 8px; height: 150px; padding-top: 8px; }
+  .col { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; gap: 6px; height: 100%; }
+  .col .cbar { width: 60%; max-width: 34px; background: var(--accent); border-radius: 6px 6px 0 0; min-height: 2px; transition: height .4s ease; }
+  .col .cbar.today { background: var(--green); }
+  .col .cval { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .col .clbl { font-size: 11px; color: var(--muted); }
+  .emptychart { color: var(--muted); font-size: 12.5px; padding: 8px 0; }
+</style>
+</head>
+<body>
+<div id="setup" class="setup" hidden>
+  <h2>PlayLimit Monitor — setup</h2>
+  <p class="meta">Reads the private logs repo directly in your browser. Nothing is sent anywhere except GitHub. The token is stored only in this browser's localStorage.</p>
+  <label>Logs repository (<code>owner/name</code>)</label>
+  <input id="s-repo" value="beukes2/playlimit-logs" />
+  <label>GitHub token (fine-grained, <b>read-only</b> Contents on this repo)</label>
+  <input id="s-token" type="password" placeholder="github_pat_..." />
+  <div class="hint">
+    <ol>
+      <li>GitHub → Settings → Developer settings → Fine-grained tokens → Generate new token</li>
+      <li>Resource owner: the repo owner · Repository access: <b>Only</b> the logs repo</li>
+      <li>Permissions: <b>Contents → Read-only</b> · set an expiry you'll rotate</li>
+    </ol>
+  </div>
+  <div style="margin-top:16px; display:flex; gap:8px;">
+    <button class="primary" id="s-save">Connect</button>
+  </div>
+  <p id="s-err" class="msg err" style="padding:8px 0 0" hidden></p>
+</div>
+
+<div id="app" hidden>
+  <header>
+    <h1>Play<span>Limit</span> Monitor</h1>
+    <span id="summary" class="meta"></span>
+    <div class="spacer"></div>
+    <span id="updated" class="meta"></span>
+    <label class="meta" style="display:flex;align-items:center;gap:6px;">
+      auto
+      <select id="interval" style="background:var(--panel2);color:var(--txt);border:1px solid var(--line);border-radius:8px;padding:6px;">
+        <option value="0">off</option>
+        <option value="30000" selected>30s</option>
+        <option value="60000">60s</option>
+        <option value="120000">2m</option>
+      </select>
+    </label>
+    <button id="refresh">Refresh</button>
+    <button id="logout">Settings</button>
+  </header>
+  <main>
+    <div id="msg" class="msg" hidden></div>
+    <section id="overview" class="overview"></section>
+    <div id="grid" class="grid"></div>
+  </main>
+</div>
+
+<dialog id="logdlg">
+  <div class="dlg-head"><b id="log-title">Log</b><button id="log-close">Close</button></div>
+  <pre id="log-body">Loading…</pre>
+</dialog>
+
+<script>
+const LS = "playlimit.monitor";
+const OFFLINE_AFTER_SEC = 360;      // 3 missed 2-min heartbeats => offline
+const DEMO = new URLSearchParams(location.search).has("demo");  // ?demo=1 -> sample data, no token
+let cfg = loadCfg();
+let timer = null;
+
+// Sample machines for ?demo=1 (lets you open the dashboard with no repo/token).
+function demoStats() {
+  const now = Math.floor(Date.now() / 1000);
+  const isoDaysAgo = n => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
+  // Build a 7-day series from a per-day map of {game: sec}.
+  const week = perDay => {
+    const days = [], pg = {}, pu = {};
+    let total = 0;
+    for (let i = 6; i >= 0; i--) {
+      const date = isoDaysAgo(i);
+      const per_game = perDay(6 - i) || {};
+      const dayTotal = Object.values(per_game).reduce((a, b) => a + b, 0);
+      days.push({ date, total_sec: dayTotal, per_game });
+      total += dayTotal;
+      for (const [k, v] of Object.entries(per_game)) pg[k] = (pg[k] || 0) + v;
+    }
+    return { total_sec: total, per_game: pg, per_user: pu, days };
+  };
+  const today = new Date().toISOString().slice(0, 10);
+  return [
+    {
+      schema: 1, host: "KIDS-PC", user: "ethan", version: "1.7.0",
+      heartbeat_epoch: now - 20, uptime_sec: 7320, date: today,
+      weekend: true, base_limit_sec: 7200, bonus_sec: 900, limit_sec: 8100,
+      used_sec: 5400, remaining_sec: 2700, disabled: false, blocked: false, warned: false,
+      playing: true, games_running: ["albion-online.exe"],
+      browser_allow_reason: "School IT class (Tuesday 08:00-13:30)",
+      sessions: [
+        { game: "roblox", start: "13:10", end: "13:55", user: "ethan" },
+        { game: "albion-online.exe", start: "14:30", end: null, user: "ethan" },
+      ],
+      psutil: true, browser_block: false, error_count: 0, warn_count: 2,
+      recent_issues: [{ ts: "2026-10-25T14:31:02", level: "WARN", msg: "LogShip: PUT status/KIDS-PC.json HTTP 409 retrying" }],
+      today: { total_sec: 5400, per_game: { "albion-online.exe": 3600, "roblox": 1800 }, per_user: { ethan: 5400 } },
+      week: week(d => [
+        { "roblox": 2400, "minecraft.windows.exe": 1800 },
+        { "albion-online.exe": 3600 },
+        { "(browser)": 2700 },
+        { "albion-online.exe": 2400, "fortnite": 1200 },
+        { "roblox": 3600 },
+        { "albion-online.exe": 1800, "(browser)": 900 },
+        { "albion-online.exe": 3600, "roblox": 1800 },
+      ][d]),
+    },
+    {
+      schema: 1, host: "LOUNGE-PC", user: "mia", version: "1.7.0",
+      heartbeat_epoch: now - 45, uptime_sec: 15300, date: today,
+      weekend: true, base_limit_sec: 7200, bonus_sec: 0, limit_sec: 7200,
+      used_sec: 7200, remaining_sec: 0, disabled: false, blocked: true, warned: true,
+      playing: true, games_running: ["minecraft.windows.exe"],
+      browser_allow_reason: null,
+      sessions: [{ game: "minecraft.windows.exe", start: "11:00", end: null, user: "mia" }],
+      psutil: true, browser_block: true, error_count: 1, warn_count: 0,
+      recent_issues: [{ ts: "2026-10-25T12:00:11", level: "ERROR", msg: "UNCAUGHT exception in thread 'TrayIcon'" }],
+      today: { total_sec: 7200, per_game: { "minecraft.windows.exe": 7200 }, per_user: { mia: 7200 } },
+      week: week(d => [
+        { "minecraft.windows.exe": 3600 },
+        { "minecraft.windows.exe": 4800 },
+        { "minecraft.windows.exe": 3000, "(browser)": 600 },
+        {},
+        { "minecraft.windows.exe": 6000 },
+        { "minecraft.windows.exe": 4200 },
+        { "minecraft.windows.exe": 7200 },
+      ][d]),
+    },
+    {
+      schema: 1, host: "OLD-LAPTOP", user: "guest", version: "1.6.9",
+      heartbeat_epoch: now - 5400, uptime_sec: 300, date: today,
+      weekend: true, base_limit_sec: 7200, bonus_sec: 0, limit_sec: 7200,
+      used_sec: 600, remaining_sec: 6600, disabled: false, blocked: false, warned: false,
+      playing: false, games_running: [], sessions: [],
+      browser_allow_reason: null,
+      psutil: false, browser_block: true, error_count: 0, warn_count: 0, recent_issues: [],
+      today: { total_sec: 600, per_game: { "roblox": 600 }, per_user: { guest: 600 } },
+      week: week(d => [{}, { "roblox": 1200 }, {}, { "roblox": 600 }, {}, {}, { "roblox": 600 }][d]),
+    },
+  ];
+}
+
+function loadCfg() {
+  try { return JSON.parse(localStorage.getItem(LS)) || {}; } catch { return {}; }
+}
+function saveCfg() { localStorage.setItem(LS, JSON.stringify(cfg)); }
+
+// ---- GitHub contents API (works for private repos with a read token) ----
+async function gh(path, { raw = false } = {}) {
+  const url = `https://api.github.com/repos/${cfg.repo}/contents/${path}`;
+  const headers = {
+    Authorization: `Bearer ${cfg.token}`,
+    Accept: raw ? "application/vnd.github.raw" : "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28",
+  };
+  const res = await fetch(url, { headers, cache: "no-store" });
+  if (!res.ok) {
+    const e = new Error(`HTTP ${res.status}`);
+    e.status = res.status;
+    throw e;
+  }
+  return raw ? res.text() : res.json();
+}
+
+function fmtDur(sec) {
+  sec = Math.max(0, Math.round(sec));
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+  if (h) return `${h}h ${m}m`;
+  if (m) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+function ago(epoch) {
+  const d = Math.floor(Date.now() / 1000 - epoch);
+  if (d < 60) return `${d}s ago`;
+  if (d < 3600) return `${Math.floor(d / 60)}m ago`;
+  if (d < 86400) return `${Math.floor(d / 3600)}h ago`;
+  return `${Math.floor(d / 86400)}d ago`;
+}
+function esc(s) { return String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+
+function statusOf(s, stale) {
+  if (stale) return { cls: "b-offline", label: "Offline" };
+  if (s.disabled) return { cls: "b-disabled", label: "Disabled" };
+  if (s.blocked) return { cls: "b-block", label: "Blocked" };
+  if (s.playing) return { cls: "b-play", label: "Playing" };
+  return { cls: "b-idle", label: "Idle" };
+}
+function barColor(used, limit) {
+  const r = limit ? used / limit : 0;
+  if (r >= 1) return "var(--red)";
+  if (r >= 0.8) return "var(--amber)";
+  return "var(--green)";
+}
+
+function sessionRows(s) {
+  const rows = (s.sessions || []).slice().reverse();
+  if (!rows.length) return `<div class="meta">No sessions today.</div>`;
+  return rows.map(r => {
+    const live = !r.end;
+    const end = live ? `<span class="live">▶ now</span>` : esc(r.end);
+    return `<div class="srow"><span class="g">${esc(r.game)}</span>
+      <span class="t">${esc(r.start)} – ${end}</span></div>`;
+  }).join("");
+}
+
+function issueRows(s) {
+  const rows = (s.recent_issues || []).slice().reverse();
+  if (!rows.length) return `<div class="meta">No warnings or errors.</div>`;
+  return rows.map(i =>
+    `<div class="issue ${esc(i.level)}">[${esc((i.ts || "").slice(11, 19))}] ${esc(i.level)} ${esc(i.msg)}</div>`
+  ).join("");
+}
+
+function card(s) {
+  const age = Date.now() / 1000 - (s.heartbeat_epoch || 0);
+  const stale = age > OFFLINE_AFTER_SEC;
+  const st = statusOf(s, stale);
+  const pct = s.limit_sec ? Math.min(100, (s.used_sec / s.limit_sec) * 100) : 0;
+  const errBadge = s.error_count ? `<span class="pill" style="color:var(--red)">${s.error_count} err</span>` : "";
+  const warnBadge = s.warn_count ? `<span class="pill" style="color:var(--amber)">${s.warn_count} warn</span>` : "";
+  const allowPill = s.browser_allow_reason ? `<span class="pill" style="color:var(--amber)" title="${esc(s.browser_allow_reason)}">browser allowed now</span>` : "";
+  return `
+  <div class="card ${stale ? "stale" : ""}">
+    <div class="card-top">
+      <span class="host">${esc(s.host)}</span>
+      <span class="ver">v${esc(s.version)}</span>
+      <span class="badge ${st.cls}">${st.label}</span>
+    </div>
+    <div>
+      <div class="time-line">
+        <span class="big">${fmtDur(s.used_sec)}</span>
+        <span class="meta">of ${fmtDur(s.limit_sec)} ${s.weekend ? "(weekend)" : "(weekday)"} · ${fmtDur(s.remaining_sec)} left</span>
+      </div>
+      <div class="bar"><i style="width:${pct}%;background:${barColor(s.used_sec, s.limit_sec)}"></i></div>
+    </div>
+    <div class="kv">
+      <b>Heartbeat</b><span>${ago(s.heartbeat_epoch)} · uptime ${fmtDur(s.uptime_sec)}</span>
+      <b>User</b><span>${esc(s.user || "—")}</span>
+      <b>Games</b><span>${s.games_running && s.games_running.length ? esc(s.games_running.join(", ")) : "—"}</span>
+      <b>Bonus</b><span>${s.bonus_sec ? "+" + fmtDur(s.bonus_sec) : "none"}</span>
+      <b>Flags</b><span>
+        <span class="pill ${s.browser_block ? "on" : "off"}">browser block ${s.browser_block ? "on" : "off"}</span>
+        <span class="pill ${s.psutil ? "on" : "off"}">psutil ${s.psutil ? "ok" : "missing"}</span>
+        ${allowPill} ${errBadge} ${warnBadge}
+      </span>
+    </div>
+    <div>
+      <div class="section-t">Sessions · ${esc(s.date)}</div>
+      <div class="sessions">${sessionRows(s)}</div>
+    </div>
+    <div>
+      <div class="section-t">Recent issues</div>
+      <div class="issues">${issueRows(s)}</div>
+    </div>
+    <div class="card-actions">
+      <button data-log="${esc(s.host)}" data-date="${esc(s.date)}">View full log</button>
+    </div>
+  </div>`;
+}
+
+function sumMaps(target, src) {
+  for (const [k, v] of Object.entries(src || {})) target[k] = (target[k] || 0) + (+v || 0);
+  return target;
+}
+function gameLabel(g) {
+  if (g === "(browser)") return "🌐 Browser";
+  return String(g).toLowerCase().endsWith(".exe") ? String(g).slice(0, -4) : g;
+}
+
+function renderOverview(stats) {
+  const el = document.getElementById("overview");
+  if (!stats || !stats.length) { el.innerHTML = ""; return; }
+
+  // Daily summary: hours per host and per user (today).
+  const rows = [];
+  for (const s of stats) {
+    const per = (s.today && s.today.per_user) || {};
+    const entries = Object.entries(per).filter(([, v]) => v > 0);
+    if (entries.length) {
+      for (const [user, sec] of entries.sort((a, b) => b[1] - a[1])) rows.push({ host: s.host, user, sec });
+    } else {
+      rows.push({ host: s.host, user: s.user || "—", sec: (s.today && s.today.total_sec) || s.used_sec || 0 });
+    }
+  }
+  rows.sort((a, b) => a.host.localeCompare(b.host) || b.sec - a.sec);
+  const dailyTotal = rows.reduce((n, r) => n + r.sec, 0);
+  const dailyTable = rows.length ? `
+    <table class="sumtable">
+      <thead><tr><th>Host</th><th>User</th><th class="num">Today</th></tr></thead>
+      <tbody>${rows.map(r => `<tr><td>${esc(r.host)}</td><td>${esc(r.user)}</td><td class="num">${fmtDur(r.sec)}</td></tr>`).join("")}
+      <tr><td colspan="2" style="color:var(--muted)">All machines</td><td class="num">${fmtDur(dailyTotal)}</td></tr></tbody>
+    </table>` : `<div class="emptychart">No usage recorded today yet.</div>`;
+
+  // Weekly by game / browser / app (summed across all hosts).
+  const games = {};
+  for (const s of stats) sumMaps(games, s.week && s.week.per_game);
+  const gameEntries = Object.entries(games).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]).slice(0, 10);
+  const gmax = gameEntries.reduce((m, [, v]) => Math.max(m, v), 0) || 1;
+  const gameBars = gameEntries.length ? `<div class="hbars">${gameEntries.map(([g, v]) => `
+    <div class="hbar"><span class="lbl">${esc(gameLabel(g))}</span>
+      <span class="track"><span class="fill" style="width:${(v / gmax * 100).toFixed(1)}%"></span></span>
+      <span class="val">${fmtDur(v)}</span></div>`).join("")}</div>`
+    : `<div class="emptychart">No game/browser time recorded this week yet.</div>`;
+
+  // Weekly total per day (summed across hosts).
+  const byDate = {};
+  const order = [];
+  for (const s of stats) for (const d of (s.week && s.week.days) || []) {
+    if (!(d.date in byDate)) { byDate[d.date] = 0; order.push(d.date); }
+    byDate[d.date] += d.total_sec || 0;
+  }
+  const days = [...new Set(order)].sort();
+  const dmax = days.reduce((m, d) => Math.max(m, byDate[d]), 0) || 1;
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const dayCols = days.length ? `<div class="cols">${days.map(d => {
+    const v = byDate[d];
+    const h = (v / dmax * 100).toFixed(1);
+    const wd = new Date(d + "T00:00:00").toLocaleDateString(undefined, { weekday: "short" });
+    return `<div class="col"><span class="cval">${v ? fmtDur(v) : ""}</span>
+      <span class="cbar ${d === todayIso ? "today" : ""}" style="height:${v ? Math.max(2, h) : 0}%"></span>
+      <span class="clbl">${wd}</span></div>`;
+  }).join("")}</div>` : `<div class="emptychart">No daily history yet.</div>`;
+
+  el.innerHTML = `
+    <div class="panel"><h3>Today — per host &amp; user</h3>${dailyTable}</div>
+    <div class="panel"><h3>This week — by game / browser / app</h3>${gameBars}</div>
+    <div class="panel"><h3>This week — total per day</h3>${dayCols}</div>`;
+}
+
+async function load() {
+  const grid = document.getElementById("grid");
+  const msg = document.getElementById("msg");
+  msg.hidden = true;
+  if (DEMO) {
+    const stats = demoStats().sort((a, b) => (a.host || "").localeCompare(b.host || ""));
+    renderOverview(stats);
+    grid.innerHTML = stats.map(card).join("");
+    grid.querySelectorAll("[data-log]").forEach(b =>
+      b.onclick = () => viewLog(b.dataset.log, b.dataset.date));
+    const online = stats.filter(s => Date.now() / 1000 - (s.heartbeat_epoch || 0) <= OFFLINE_AFTER_SEC).length;
+    const playing = stats.filter(s => s.playing && !s.disabled).length;
+    document.getElementById("summary").textContent = `${stats.length} machine(s) · ${online} online · ${playing} playing · DEMO`;
+    document.getElementById("updated").textContent = "updated " + new Date().toLocaleTimeString();
+    return;
+  }
+  try {
+    let items;
+    try {
+      items = await gh("status");
+    } catch (e) {
+      if (e.status === 404) {
+        show("No status/ folder yet. It appears after a machine running v1.7.0+ ships its first heartbeat (~30s after launch).");
+        grid.innerHTML = ""; return;
+      }
+      throw e;
+    }
+    const files = (items || []).filter(f => f.type === "file" && f.name.endsWith(".json"));
+    if (!files.length) { show("No machines reporting yet."); grid.innerHTML = ""; return; }
+    const stats = [];
+    for (const f of files) {
+      try { stats.push(JSON.parse(await gh(f.path, { raw: true }))); }
+      catch (e) { console.warn("parse", f.path, e); }
+    }
+    stats.sort((a, b) => (a.host || "").localeCompare(b.host || ""));
+    renderOverview(stats);
+    grid.innerHTML = stats.map(card).join("");
+    grid.querySelectorAll("[data-log]").forEach(b =>
+      b.onclick = () => viewLog(b.dataset.log, b.dataset.date));
+
+    const online = stats.filter(s => Date.now() / 1000 - (s.heartbeat_epoch || 0) <= OFFLINE_AFTER_SEC).length;
+    const playing = stats.filter(s => s.playing && !s.disabled).length;
+    document.getElementById("summary").textContent =
+      `${stats.length} machine(s) · ${online} online · ${playing} playing`;
+    document.getElementById("updated").textContent = "updated " + new Date().toLocaleTimeString();
+  } catch (e) {
+    if (e.status === 401 || e.status === 403) {
+      show("Token rejected (HTTP " + e.status + "). Check it has Contents: Read on this repo and isn't expired.", true);
+    } else if (e.status === 404) {
+      show("Repo not found (404). Check owner/name and that the token can see it.", true);
+    } else {
+      show("Error: " + e.message, true);
+    }
+  }
+}
+
+function show(text, isErr) {
+  const msg = document.getElementById("msg");
+  msg.textContent = text; msg.className = "msg" + (isErr ? " err" : ""); msg.hidden = false;
+}
+
+async function viewLog(host, date) {
+  const dlg = document.getElementById("logdlg");
+  const safe = host.replace(/[^A-Za-z0-9_-]/g, "_");
+  document.getElementById("log-title").textContent = `${host} — ${date}`;
+  const body = document.getElementById("log-body");
+  body.textContent = "Loading…";
+  dlg.showModal();
+  if (DEMO) {
+    body.textContent =
+      `# PlayLimit log | host=${host} | version=1.7.0 | DEMO\n` +
+      `[${date} 14:30:01] [INFO] GAME START albion-online.exe at 14:30\n` +
+      `[${date} 14:31:02] [WARN] LogShip: PUT status/${host}.json HTTP 409 retrying\n` +
+      `[${date} 14:45:00] [INFO] Playing... 45m / 135m used, 1h 30m remaining\n`;
+    return;
+  }
+  try {
+    body.textContent = await gh(`logs/${safe}-${date}.log`, { raw: true });
+    body.scrollTop = body.scrollHeight;
+  } catch (e) {
+    body.textContent = e.status === 404
+      ? "No log file for this day yet (logs ship every 10 min)."
+      : "Error loading log: " + e.message;
+  }
+}
+
+function setInterval_(ms) {
+  if (timer) { clearInterval(timer); timer = null; }
+  if (ms > 0) timer = setInterval(load, ms);
+}
+
+// ---- wiring ----
+function showSetup(prefillErr) {
+  document.getElementById("app").hidden = true;
+  const s = document.getElementById("setup"); s.hidden = false;
+  document.getElementById("s-repo").value = cfg.repo || "beukes2/playlimit-logs";
+  document.getElementById("s-token").value = cfg.token || "";
+  const se = document.getElementById("s-err");
+  se.hidden = !prefillErr; if (prefillErr) se.textContent = prefillErr;
+}
+function showApp() {
+  document.getElementById("setup").hidden = true;
+  document.getElementById("app").hidden = false;
+  load();
+  setInterval_(Number(document.getElementById("interval").value));
+}
+
+document.getElementById("s-save").onclick = () => {
+  cfg.repo = document.getElementById("s-repo").value.trim().replace(/^https?:\/\/github\.com\//, "").replace(/\.git$/, "");
+  cfg.token = document.getElementById("s-token").value.trim();
+  if (!cfg.repo || !cfg.token) { showSetup("Enter both a repo and a token."); return; }
+  saveCfg(); showApp();
+};
+document.getElementById("refresh").onclick = load;
+document.getElementById("logout").onclick = () => showSetup();
+document.getElementById("interval").onchange = e => setInterval_(Number(e.target.value));
+document.getElementById("log-close").onclick = () => document.getElementById("logdlg").close();
+
+if (DEMO || (cfg.repo && cfg.token)) showApp(); else showSetup();
+</script>
+</body>
+</html>
