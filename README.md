@@ -66,11 +66,11 @@ git push
 ```
 `version.txt` must contain the new version (e.g. `1.4.0`) or clients will not pick it up.
 
-> **Releasing v1.7.0:** the source, `version_info.txt`, and `__version__` are
-> already bumped to `1.7.0`, but `version.txt` is still `1.6.9` **on purpose** —
-> bump it to `1.7.0` **only after** rebuilding `dist/PlayLimit.exe` and its
-> `.sha256` on Windows and committing them together. Bumping `version.txt` ahead
-> of the rebuilt exe would make clients "update" to the stale 1.6.9 bytes.
+> **Versioning policy (see `AGENTS.md`):** bump the version on *every* change —
+> `__version__`, `version_info.txt`, and `version.txt` in lockstep. All are now at
+> `1.7.0`. **Before releasing/merging a `version.txt` bump you must rebuild**
+> `dist/PlayLimit.exe` + `dist/PlayLimit.exe.sha256` on Windows and commit them in
+> the same change — otherwise clients "update" to the stale exe still in `dist/`.
 
 ## Installation (none needed — just open the exe)
 
