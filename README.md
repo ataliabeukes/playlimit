@@ -57,6 +57,12 @@ switching. v1.4.0 runs from `%ProgramData%` and hops automatically.
 
 Build + publish a new version (example v1.4.0):
 ```powershell
+# IMPORTANT: pin PyInstaller to 6.22.0. 6.22.1+ adds a onefile parent-process
+# security check that aborts PlayLimit's ELEVATED launch (Task Scheduler
+# RunLevel Highest + self-hop) with "security validation failure: failed to
+# obtain executable path for parent process". Do not bump past 6.22.0 without
+# re-testing an elevated launch on a real Windows box.
+pip install "pyinstaller==6.22.0" pystray pillow psutil
 py -m PyInstaller --onefile --noconsole --name PlayLimit --icon playlimit.ico --version-file version_info.txt --distpath dist --workpath build --specpath . --hidden-import pystray --hidden-import PIL --hidden-import psutil albion_limiter.py
 $sha = (Get-FileHash dist\PlayLimit.exe -Algorithm SHA256).Hash
 "$sha  PlayLimit.exe" | Set-Content dist\PlayLimit.exe.sha256 -NoNewline
@@ -68,7 +74,7 @@ git push
 
 > **Versioning policy (see `AGENTS.md`):** bump the version on *every* change —
 > `__version__`, `version_info.txt`, and `version.txt` in lockstep. All are now at
-> `1.7.0`. **Before releasing/merging a `version.txt` bump you must rebuild**
+> `1.7.1`. **Before releasing/merging a `version.txt` bump you must rebuild**
 > `dist/PlayLimit.exe` + `dist/PlayLimit.exe.sha256` on Windows and commit them in
 > the same change — otherwise clients "update" to the stale exe still in `dist/`.
 

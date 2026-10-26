@@ -20,7 +20,7 @@ import threading
 import collections
 from pathlib import Path
 
-__version__ = "1.7.0"
+__version__ = "1.7.1"
 APP_NAME = "PlayLimit"
 
 # ---------- CONFIG ----------

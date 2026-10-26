@@ -32,6 +32,21 @@ Work directly on the default branch (`master`). Do **not** create feature branch
 or open PRs for routine changes — commit straight to `master`. (This overrides the
 general "one branch + one PR per change" workflow for this repo.)
 
+The canonical remote is **`origin` = `ataliabeukes/playlimit`** (push target, where CI
+runs, and what clients pull from). `beukes2/playlimit` is `upstream`, reference-only —
+this machine's login has no push rights there (403), so never push to `upstream`.
+
+## Build toolchain: pin PyInstaller to 6.22.0
+
+Always build the exe with **`pyinstaller==6.22.0`** (both the CI workflow and local
+builds). PyInstaller **6.22.1+** added a onefile parent-process security validation
+(#9492) that aborts PlayLimit's **elevated** launch — it runs via Task Scheduler at
+`RunLevel Highest` and is re-spawned by the self-hop updater, so the bootloader can't
+resolve its parent and exits with *"security validation failure: failed to obtain
+executable path for parent process"* before any app code runs. 6.22.0 is the newest
+release without that check. Do **not** bump past 6.22.0 without re-testing an elevated
+launch on a real Windows box.
+
 ## Commits
 
 Commits are GPG-signed by the maintainer. Prepare the working tree and hand over the
