@@ -17,9 +17,10 @@ import datetime
 import subprocess
 import ctypes
 import threading
+import collections
 from pathlib import Path
 
-__version__ = "1.6.9"
+__version__ = "1.7.0"
 APP_NAME = "PlayLimit"
 
 # ---------- CONFIG ----------
@@ -94,6 +95,37 @@ BROWSER_PROCESSES = [
     "arc.exe",
     "browser.exe",
 ]
+BROWSER_PROCESSES_SET = set(n.lower() for n in BROWSER_PROCESSES)
+
+# ---------- SCHEDULED BROWSER ALLOW WINDOWS ----------
+# Recurring weekly windows during which browser blocking is PAUSED (browsers may
+# stay open). Games are still limited/counted as normal - this only affects the
+# browser kill. Each entry: (weekday, "HH:MM" start, "HH:MM" end, reason).
+# weekday uses datetime.weekday(): Monday=0, Tuesday=1, ... Sunday=6.
+BROWSER_ALLOW_WINDOWS = [
+    # REASON: Tuesday is IT class at school - the child needs a web browser for
+    # schoolwork between 08:00 and 13:30, so browser blocking is paused then.
+    (1, "08:00", "13:30", "School IT class (Tuesday 08:00-13:30)"),
+]
+
+def browser_allow_window_now(now: datetime.datetime = None):
+    """If a scheduled allow-window is active right now, return its reason string;
+    otherwise return None. Used to pause browser blocking (e.g. Tuesday school IT)."""
+    try:
+        now = now or datetime.datetime.now()
+        cur_min = now.hour * 60 + now.minute
+        for wd, start, end, reason in BROWSER_ALLOW_WINDOWS:
+            if now.weekday() != wd:
+                continue
+            sm = _hhmm_to_min(start)
+            em = _hhmm_to_min(end)
+            if sm is None or em is None:
+                continue
+            if sm <= cur_min < em:
+                return reason
+    except Exception:
+        pass
+    return None
 
 # Browser block exempt - private; set env var PLAYLIMIT_EXEMPT=1 or create file %ProgramData%\AlbionLimiter\no_browser_block on dev PC
 def is_browser_block_exempt() -> bool:
@@ -140,7 +172,32 @@ def get_data_dir():
 DATA_DIR = get_data_dir()
 STATE_FILE = DATA_DIR / "state.json"
 LOG_FILE = DATA_DIR / "limiter.log"
+STATUS_FILE = DATA_DIR / "status.json"   # machine-readable heartbeat for the remote monitor
+HISTORY_FILE = DATA_DIR / "history.json" # per-day usage history (per game/app + per user), kept across days
 DISABLE_FLAG_FILE = DATA_DIR / "disabled.flag"
+
+def _current_user() -> str:
+    """Best-effort current OS username (for per-user usage in the monitor)."""
+    for getter in (lambda: os.environ.get("USERNAME"),
+                   lambda: os.environ.get("USER"),
+                   lambda: __import__("getpass").getuser()):
+        try:
+            u = getter()
+            if u:
+                return str(u)
+        except Exception:
+            continue
+    return "unknown"
+
+# Hostname is used for log/status file names and in the status payload.
+try:
+    import socket as _socket
+    HOSTNAME = _socket.gethostname()
+except Exception:
+    HOSTNAME = os.environ.get("COMPUTERNAME", "unknown")
+# Filesystem/URL-safe variant used for the per-machine paths in the logs repo.
+SAFE_HOST = "".join(c if (c.isalnum() or c in "-_") else "_" for c in HOSTNAME) or "unknown"
+_APP_START_EPOCH = time.time()
 
 # ---------- AUTO-UPDATE CONFIG ----------
 # The app RUNS from LIVE_EXE (inside DATA_DIR, writable by standard users), so it can
@@ -161,9 +218,36 @@ try:
 except ImportError:
     HAS_PSUTIL = False
 
-def log(msg: str):
+# ---------- STRUCTURED LOGGING ----------
+# Every line is "[YYYY-MM-DD HH:MM:SS] [LEVEL] message" so the remote monitor can
+# filter by severity. WARN/ERROR lines are also kept in a small ring buffer that
+# is surfaced in status.json (so the dashboard can show recent problems without
+# downloading the whole log).
+_errors_lock = threading.Lock()
+_recent_issues = collections.deque(maxlen=50)
+_error_count_total = 0
+_warn_count_total = 0
+
+def _record_issue(level: str, msg: str):
+    global _error_count_total, _warn_count_total
+    try:
+        with _errors_lock:
+            if level == "ERROR":
+                _error_count_total += 1
+            elif level == "WARN":
+                _warn_count_total += 1
+            _recent_issues.append({
+                "ts": datetime.datetime.now().isoformat(timespec="seconds"),
+                "level": level,
+                # first line only + capped, so one traceback cannot flood status.json
+                "msg": (msg or "").splitlines()[0][:300] if msg else "",
+            })
+    except Exception:
+        pass
+
+def _emit(level: str, msg: str):
     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    line = f"[{ts}] {msg}"
+    line = f"[{ts}] [{level}] {msg}"
     try:
         print(line, flush=True)
     except Exception:
@@ -173,6 +257,48 @@ def log(msg: str):
             f.write(line + "\n")
     except Exception:
         pass
+    if level in ("WARN", "ERROR"):
+        _record_issue(level, msg)
+
+def log(msg: str):
+    """Informational log line (default level, keeps the historic call sites working)."""
+    _emit("INFO", msg)
+
+def log_warn(msg: str):
+    _emit("WARN", msg)
+
+def log_error(msg: str, exc: BaseException = None):
+    """Log an error. Pass exc=<exception> to append a full traceback."""
+    if exc is not None:
+        import traceback as _tb
+        tb = "".join(_tb.format_exception(type(exc), exc, exc.__traceback__)).rstrip()
+        msg = f"{msg}\n{tb}"
+    _emit("ERROR", msg)
+
+def _install_excepthooks():
+    """Make sure nothing crashes silently: route uncaught exceptions (main thread
+    and worker threads) through log_error so they land in limiter.log + status.json."""
+    def _main_hook(exc_type, exc, tb):
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc, tb)
+            return
+        try:
+            log_error("UNCAUGHT exception (main thread)", exc=exc)
+        except Exception:
+            pass
+    sys.excepthook = _main_hook
+    try:
+        def _thread_hook(args):
+            if issubclass(args.exc_type, KeyboardInterrupt):
+                return
+            try:
+                tname = getattr(args.thread, "name", "?")
+                log_error(f"UNCAUGHT exception in thread '{tname}'", exc=args.exc_value)
+            except Exception:
+                pass
+        threading.excepthook = _thread_hook
+    except Exception:
+        pass  # threading.excepthook only exists on Python 3.8+
 
 _shutdown = threading.Event()
 _tk_root = None
@@ -282,6 +408,44 @@ _state_lock = threading.Lock()
 
 SESSION_KEEP = 30  # session history rows kept in state.json
 
+def _coerce_int(v, default: int = 0) -> int:
+    try:
+        return int(v)
+    except Exception:
+        return default
+
+def _sanitize_state(data: dict, default: dict) -> dict:
+    """Merge loaded data over defaults and coerce critical fields to safe types.
+
+    A partially-corrupt or hand-edited state.json (string counters, a sessions
+    value that is not a list, malformed rows, ...) must never be able to crash
+    the main loop or let the counter be bypassed. Anything unparseable falls back
+    to its default; negative counters are clamped to 0.
+    """
+    st = {**default, **(data if isinstance(data, dict) else {})}
+    st["used_seconds"] = max(0, _coerce_int(st.get("used_seconds"), 0))
+    st["bonus_seconds"] = max(0, _coerce_int(st.get("bonus_seconds"), 0))
+    st["warned"] = bool(st.get("warned"))
+    st["blocked_notified"] = bool(st.get("blocked_notified"))
+    st["last_seen_running"] = bool(st.get("last_seen_running"))
+    if not isinstance(st.get("date"), str):
+        st["date"] = default["date"]
+    raw_sessions = st.get("sessions")
+    clean = []
+    if isinstance(raw_sessions, list):
+        for s in raw_sessions:
+            if isinstance(s, dict) and s.get("game"):
+                row = {
+                    "game": str(s.get("game")),
+                    "start": s.get("start"),
+                    "end": s.get("end"),
+                }
+                if s.get("user"):
+                    row["user"] = str(s.get("user"))
+                clean.append(row)
+    st["sessions"] = clean
+    return st
+
 def load_state() -> dict:
     default = {
         "date": datetime.date.today().isoformat(),
@@ -298,20 +462,208 @@ def load_state() -> dict:
     try:
         data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
         # Reset if new day
-        if data.get("date") != datetime.date.today().isoformat():
-            log(f"New day detected ({data.get('date')} -> {datetime.date.today().isoformat()}), resetting counter")
+        if (data or {}).get("date") != datetime.date.today().isoformat():
+            log(f"New day detected ({(data or {}).get('date')} -> {datetime.date.today().isoformat()}), resetting counter")
             return default
-        return {**default, **data}
+        return _sanitize_state(data, default)
     except Exception as e:
-        log(f"State load error: {e}, resetting")
+        # Corrupt/unreadable file: reset rather than crash. A truncated write can
+        # no longer happen now that save_state is atomic (see below).
+        log_warn(f"State load error: {e}, resetting")
         return default
 
 def save_state(state: dict):
+    """Persist state atomically: write a temp file then os.replace() it over the
+    real file, so a crash/power-loss mid-write can never leave a truncated
+    state.json (which would reset the counter and let the day be replayed)."""
     try:
         STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        STATE_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        tmp = STATE_FILE.with_name(STATE_FILE.name + ".tmp")
+        tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        tmp.replace(STATE_FILE)
     except Exception as e:
         log(f"State save error: {e}")
+
+# ---------- USAGE HISTORY (per game/app + per user, persisted across days) ----------
+# Unlike state.json (which resets at midnight), history.json accumulates a rolling
+# window of daily usage so the monitor can draw daily/weekly summaries.
+_history_lock = threading.Lock()
+HISTORY_KEEP_DAYS = 35
+BROWSER_HISTORY_KEY = "(browser)"
+
+def load_history() -> dict:
+    try:
+        if HISTORY_FILE.exists():
+            data = json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and isinstance(data.get("days"), dict):
+                return data
+    except Exception as e:
+        log_warn(f"History load error: {e}, resetting")
+    return {"days": {}}
+
+def save_history(hist: dict):
+    try:
+        HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = HISTORY_FILE.with_name(HISTORY_FILE.name + ".tmp")
+        tmp.write_text(json.dumps(hist, indent=2), encoding="utf-8")
+        tmp.replace(HISTORY_FILE)
+    except Exception as e:
+        log(f"History save error: {e}")
+
+def _history_day(hist: dict, day_iso: str) -> dict:
+    days = hist.setdefault("days", {})
+    d = days.get(day_iso)
+    if not isinstance(d, dict):
+        d = {"total_sec": 0, "per_game": {}, "per_user": {}}
+        days[day_iso] = d
+    d.setdefault("total_sec", 0)
+    d.setdefault("per_game", {})
+    d.setdefault("per_user", {})
+    return d
+
+def credit_history(hist: dict, day_iso: str, credit: float, games, user: str, browsers=None):
+    """Add `credit` seconds to today's buckets: total, each running game/app, the
+    browser bucket (if any browser is open), and the current user. Mutates hist."""
+    c = int(round(credit))
+    if c <= 0:
+        return hist
+    d = _history_day(hist, day_iso)
+    d["total_sec"] = int(d.get("total_sec", 0)) + c
+    for g in (games or []):
+        key = str(g)
+        d["per_game"][key] = int(d["per_game"].get(key, 0)) + c
+    if browsers:
+        d["per_game"][BROWSER_HISTORY_KEY] = int(d["per_game"].get(BROWSER_HISTORY_KEY, 0)) + c
+    if user:
+        d["per_user"][user] = int(d["per_user"].get(user, 0)) + c
+    # prune old days
+    try:
+        days = hist.get("days", {})
+        if len(days) > HISTORY_KEEP_DAYS:
+            for old in sorted(days.keys())[:-HISTORY_KEEP_DAYS]:
+                days.pop(old, None)
+    except Exception:
+        pass
+    return hist
+
+def build_week_summary(hist: dict, today: datetime.date = None) -> dict:
+    """Aggregate the last 7 days (incl. today) into per-game, per-user, and a
+    per-day series for the dashboard's daily summary + weekly bar chart."""
+    today = today or datetime.date.today()
+    days_out = []
+    week_games = {}
+    week_users = {}
+    week_total = 0
+    hdays = (hist or {}).get("days", {}) or {}
+    for i in range(6, -1, -1):
+        d = (today - datetime.timedelta(days=i)).isoformat()
+        rec = hdays.get(d) or {}
+        total = int(rec.get("total_sec", 0) or 0)
+        per_game = {str(k): int(v or 0) for k, v in (rec.get("per_game", {}) or {}).items()}
+        days_out.append({"date": d, "total_sec": total, "per_game": per_game})
+        week_total += total
+        for k, v in per_game.items():
+            week_games[k] = week_games.get(k, 0) + v
+        for k, v in (rec.get("per_user", {}) or {}).items():
+            week_users[str(k)] = week_users.get(str(k), 0) + int(v or 0)
+    return {"total_sec": week_total, "per_game": week_games, "per_user": week_users, "days": days_out}
+
+# ---------- STATUS SNAPSHOT (for the remote monitor) ----------
+STATUS_SCHEMA = 1
+
+def build_status(state: dict = None, games_now=None) -> dict:
+    """Build a machine-readable snapshot of the current state for the dashboard."""
+    today = datetime.date.today()
+    if state is None:
+        try:
+            state = load_state()
+        except Exception:
+            state = {}
+    try:
+        limit = get_effective_limit_sec(today, state)
+    except Exception:
+        limit = get_daily_limit_sec(today)
+    used = int(state.get("used_seconds", 0) or 0)
+    try:
+        disabled = is_disabled()
+    except Exception:
+        disabled = False
+    try:
+        allow_reason = browser_allow_window_now()
+    except Exception:
+        allow_reason = None
+    try:
+        browser_block = (not is_browser_block_exempt()) and (not disabled) and (not allow_reason)
+    except Exception:
+        browser_block = False
+    with _errors_lock:
+        recent = list(_recent_issues)[-15:]
+        err_total = _error_count_total
+        warn_total = _warn_count_total
+    # Daily + weekly usage summary (per game/app + per user) from history.json.
+    today_summary = {"total_sec": used, "per_game": {}, "per_user": {}}
+    week_summary = {"total_sec": 0, "per_game": {}, "per_user": {}, "days": []}
+    try:
+        with _history_lock:
+            hist = load_history()
+        week_summary = build_week_summary(hist, today)
+        today_rec = (hist.get("days", {}) or {}).get(today.isoformat()) or {}
+        today_summary = {
+            "total_sec": int(today_rec.get("total_sec", 0) or 0) or used,
+            "per_game": {str(k): int(v or 0) for k, v in (today_rec.get("per_game", {}) or {}).items()},
+            "per_user": {str(k): int(v or 0) for k, v in (today_rec.get("per_user", {}) or {}).items()},
+        }
+    except Exception:
+        pass
+    return {
+        "schema": STATUS_SCHEMA,
+        "host": HOSTNAME,
+        "user": _current_user(),
+        "version": __version__,
+        "heartbeat": datetime.datetime.now().isoformat(timespec="seconds"),
+        "heartbeat_epoch": int(time.time()),
+        "uptime_sec": int(time.time() - _APP_START_EPOCH),
+        "date": state.get("date") or today.isoformat(),
+        "weekend": is_weekend(today),
+        "base_limit_sec": get_daily_limit_sec(today),
+        "bonus_sec": int(state.get("bonus_seconds", 0) or 0),
+        "limit_sec": limit,
+        "used_sec": used,
+        "remaining_sec": max(0, limit - used),
+        "disabled": disabled,
+        "blocked": (used >= limit) and not disabled,
+        "warned": bool(state.get("warned")),
+        "playing": bool(games_now),
+        "games_running": list(games_now or []),
+        "sessions": state.get("sessions", []) or [],
+        "psutil": HAS_PSUTIL,
+        "browser_block": browser_block,
+        "browser_allow_reason": allow_reason,
+        "data_dir": str(DATA_DIR),
+        "recent_issues": recent,
+        "error_count": err_total,
+        "warn_count": warn_total,
+        "today": today_summary,
+        "week": week_summary,
+    }
+
+def write_status(state: dict = None, games_now=None):
+    """Write status.json atomically. Returns the dict written (or None on failure)."""
+    try:
+        data = build_status(state, games_now)
+        STATUS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = STATUS_FILE.with_name(STATUS_FILE.name + ".tmp")
+        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        tmp.replace(STATUS_FILE)
+        return data
+    except Exception as e:
+        # Do not route through log_error here - a failing status write should not
+        # be able to recurse into more status churn. Plain stderr/print is enough.
+        try:
+            print(f"write_status error: {e}", flush=True)
+        except Exception:
+            pass
+        return None
 
 # ---------- AUTO-UPDATE HELPERS ----------
 def _sha256_file(p: Path) -> str:
@@ -997,8 +1349,10 @@ def force_update_check():
 # file created by the parent on each machine - NEVER baked into the exe/repo.
 LOG_REPO = "beukes2/playlimit-logs"
 TOKEN_FILE = DATA_DIR / "github_token.txt"
-LOG_UPLOAD_EVERY_SEC = 600
+LOG_UPLOAD_EVERY_SEC = 600            # full log tail (bulky) - every 10 min
 LOG_UPLOAD_MAX_BYTES = 200 * 1024
+STATUS_UPLOAD_EVERY_SEC = 120         # status.json heartbeat (tiny) - every 2 min
+STATUS_UPLOAD_FIRST_DELAY = 30        # first heartbeat ~30s after start
 
 def _read_token():
     try:
@@ -1009,86 +1363,121 @@ def _read_token():
         pass
     return None
 
-def _upload_log_once():
-    """Upload last LOG_UPLOAD_MAX_BYTES of limiter.log to logs/<HOST>-<date>.log. Returns True on success."""
-    token = _read_token()
-    if not token:
-        return False
+def _github_put_file(token: str, path: str, content: bytes, message: str) -> bool:
+    """Create/overwrite a file in LOG_REPO via the GitHub contents API. Returns True on 200/201."""
+    import base64 as _b64
+    import urllib.request as _urlreq
+    import urllib.error as _urlerr
+    api = f"https://api.github.com/repos/{LOG_REPO}/contents/{path}"
+    auth = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json", "User-Agent": "PlayLimit"}
+    # Need the current blob sha to overwrite an existing file.
+    sha = None
     try:
-        import socket
-        import base64 as _b64
-        import urllib.request as _urlreq
-        import urllib.error as _urlerr
-        try:
-            host = socket.gethostname()
-        except Exception:
-            host = os.environ.get("COMPUTERNAME", "unknown")
-        safe_host = "".join(c if (c.isalnum() or c in "-_") else "_" for c in host) or "unknown"
-        day = datetime.date.today().isoformat()
-        try:
-            raw = LOG_FILE.read_bytes()
-        except Exception:
+        req = _urlreq.Request(api, headers=auth)
+        with _urlreq.urlopen(req, timeout=15) as resp:
+            sha = json.loads(resp.read().decode("utf-8")).get("sha")
+    except _urlerr.HTTPError as e:
+        if e.code != 404:
+            log_warn(f"LogShip: check {path} failed HTTP {e.code}")
             return False
-        if len(raw) > LOG_UPLOAD_MAX_BYTES:
-            raw = raw[-LOG_UPLOAD_MAX_BYTES:]
-        header = f"# PlayLimit log | host={host} | version={__version__} | uploaded={datetime.datetime.now().isoformat()} | tail\n".encode("utf-8")
-        body = _b64.b64encode(header + raw).decode("ascii")
-        path = f"logs/{safe_host}-{day}.log"
-        api = f"https://api.github.com/repos/{LOG_REPO}/contents/{path}"
-        headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
-                   "Content-Type": "application/json", "User-Agent": "PlayLimit"}
-        # Need sha when overwriting an existing file
-        sha = None
-        try:
-            req = _urlreq.Request(api, headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json", "User-Agent": "PlayLimit"})
-            with _urlreq.urlopen(req, timeout=15) as resp:
-                sha = json.loads(resp.read().decode("utf-8")).get("sha")
-        except _urlerr.HTTPError as e:
-            if e.code != 404:
-                log(f"LogShip: check failed HTTP {e.code}")
-                return False
-        except Exception as e:
-            log(f"LogShip: check failed: {e}")
-            return False
-        payload = json.dumps({"message": f"log {safe_host} {day} {__version__}", "content": body, **({"sha": sha} if sha else {})}).encode("utf-8")
-        req = _urlreq.Request(api, data=payload, method="PUT", headers=headers)
+    except Exception as e:
+        log_warn(f"LogShip: check {path} failed: {e}")
+        return False
+    body_b64 = _b64.b64encode(content).decode("ascii")
+    payload = json.dumps({"message": message, "content": body_b64, **({"sha": sha} if sha else {})}).encode("utf-8")
+    headers = {**auth, "Content-Type": "application/json"}
+    req = _urlreq.Request(api, data=payload, method="PUT", headers=headers)
+    try:
         with _urlreq.urlopen(req, timeout=30) as resp:
             if resp.status in (200, 201):
-                log(f"LogShip: uploaded {len(raw)} bytes -> {path}")
                 return True
-            log(f"LogShip: unexpected HTTP {resp.status}")
+            log_warn(f"LogShip: PUT {path} unexpected HTTP {resp.status}")
             return False
     except _urlerr.HTTPError as e:
         try:
             detail = e.read().decode("utf-8", errors="ignore")[:200]
         except Exception:
             detail = ""
-        log(f"LogShip: upload HTTP {e.code} {detail}")
+        log_warn(f"LogShip: PUT {path} HTTP {e.code} {detail}")
         return False
     except Exception as e:
-        log(f"LogShip: upload failed: {e}")
+        log_warn(f"LogShip: PUT {path} failed: {e}")
         return False
 
+def _upload_log_once() -> bool:
+    """Upload last LOG_UPLOAD_MAX_BYTES of limiter.log to logs/<HOST>-<date>.log. Returns True on success."""
+    token = _read_token()
+    if not token:
+        return False
+    try:
+        raw = LOG_FILE.read_bytes()
+    except Exception:
+        return False
+    if len(raw) > LOG_UPLOAD_MAX_BYTES:
+        raw = raw[-LOG_UPLOAD_MAX_BYTES:]
+    header = f"# PlayLimit log | host={HOSTNAME} | version={__version__} | uploaded={datetime.datetime.now().isoformat()} | tail\n".encode("utf-8")
+    day = datetime.date.today().isoformat()
+    path = f"logs/{SAFE_HOST}-{day}.log"
+    ok = _github_put_file(token, path, header + raw, f"log {SAFE_HOST} {day} {__version__}")
+    if ok:
+        log(f"LogShip: uploaded {len(raw)} bytes -> {path}")
+    return ok
+
+def _upload_status_once() -> bool:
+    """Upload the current status.json heartbeat to status/<HOST>.json. Returns True on success."""
+    token = _read_token()
+    if not token:
+        return False
+    # Prefer the file the main loop keeps fresh; fall back to building one on demand.
+    data = None
+    body = None
+    try:
+        txt = STATUS_FILE.read_text(encoding="utf-8")
+        data = json.loads(txt)
+        body = txt.encode("utf-8")
+    except Exception:
+        data = write_status()
+        if data is None:
+            return False
+        body = json.dumps(data, indent=2).encode("utf-8")
+    path = f"status/{SAFE_HOST}.json"
+    ok = _github_put_file(token, path, body, f"status {SAFE_HOST} {data.get('date')} {__version__}")
+    if ok:
+        log(f"LogShip: status heartbeat -> {path}")
+    return ok
+
 def logship_thread():
-    """Upload logs every LOG_UPLOAD_EVERY_SEC (first try 60s after start). Silent when no token file."""
+    """Ship status.json (every STATUS_UPLOAD_EVERY_SEC) and the log tail (every
+    LOG_UPLOAD_EVERY_SEC) to the private logs repo. Silent when no token file."""
     try:
         if not _read_token():
             log("LogShip: no token file (github_token.txt) - log shipping off (see README)")
             return
-        log("LogShip: token found - shipping logs to GitHub")
+        log("LogShip: token found - shipping status + logs to GitHub")
     except Exception:
         pass
     try:
-        time.sleep(60)
+        time.sleep(STATUS_UPLOAD_FIRST_DELAY)
+        last_log_upload = 0.0  # 0 => upload the log on the first cycle too
         while not _shutdown.is_set():
+            now = time.monotonic()
             try:
-                _upload_log_once()
+                _upload_status_once()
             except Exception as e:
                 try:
-                    log(f"LogShip: cycle error: {e}")
+                    log_warn(f"LogShip: status cycle error: {e}")
                 except Exception:
                     pass
-            _shutdown.wait(LOG_UPLOAD_EVERY_SEC)
+            if now - last_log_upload >= LOG_UPLOAD_EVERY_SEC:
+                last_log_upload = now
+                try:
+                    _upload_log_once()
+                except Exception as e:
+                    try:
+                        log_warn(f"LogShip: log cycle error: {e}")
+                    except Exception:
+                        pass
+            _shutdown.wait(STATUS_UPLOAD_EVERY_SEC)
     except Exception:
         pass
 
@@ -1749,7 +2138,7 @@ def get_running_games():
 
     # tasklist union pass (catches elevated games psutil cannot inspect)
     try:
-        out = subprocess.check_output('tasklist /FO CSV /NH', shell=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW)
+        out = subprocess.check_output('tasklist /FO CSV /NH', shell=True, text=True, timeout=10, creationflags=subprocess.CREATE_NO_WINDOW)
         for hit in _tasklist_game_hits(out):
             found[hit] = hit
     except Exception as e:
@@ -1769,8 +2158,9 @@ def is_albion_running() -> bool:
         return False
 
 def is_browser_running() -> bool:
-    """Check if any browser process is running."""
-    if is_disabled() or is_browser_block_exempt():
+    """Check if any browser process is running (for blocking). Returns False while
+    a scheduled allow-window is active (e.g. Tuesday school IT) so browsers stay open."""
+    if is_disabled() or is_browser_block_exempt() or browser_allow_window_now():
         return False
     names_lower = [n.lower() for n in BROWSER_PROCESSES]
     if HAS_PSUTIL:
@@ -1786,7 +2176,7 @@ def is_browser_running() -> bool:
         except Exception as e:
             log(f"browser psutil error: {e}")
     try:
-        out = subprocess.check_output('tasklist /FO CSV /NH', shell=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW)
+        out = subprocess.check_output('tasklist /FO CSV /NH', shell=True, text=True, timeout=10, creationflags=subprocess.CREATE_NO_WINDOW)
         low = out.lower()
         for n in names_lower:
             if n.lower() in low:
@@ -1795,9 +2185,37 @@ def is_browser_running() -> bool:
     except Exception:
         return False
 
+def get_running_browsers():
+    """Raw list of browser display names currently running, ignoring block/allow
+    state. Used only for usage history (so browser time during an allow-window is
+    recorded). Kept cheap - name-only scan."""
+    found = {}
+    if HAS_PSUTIL:
+        try:
+            for p in psutil.process_iter(['name']):
+                try:
+                    name = p.info.get('name') or ""
+                    if name.lower() in BROWSER_PROCESSES_SET:
+                        found[name.lower()] = name
+                except Exception:
+                    continue
+        except Exception:
+            pass
+    else:
+        try:
+            out = subprocess.check_output('tasklist /FO CSV /NH', shell=True, text=True, timeout=10, creationflags=subprocess.CREATE_NO_WINDOW)
+            low = out.lower()
+            for b in BROWSER_PROCESSES:
+                if b.lower() in low:
+                    found[b.lower()] = b
+        except Exception:
+            pass
+    return sorted(found.values(), key=str.lower)
+
 def kill_browsers():
-    """Close any browser process immediately."""
-    if is_disabled() or is_browser_block_exempt():
+    """Close any browser process immediately - unless a scheduled allow-window is
+    active (e.g. Tuesday school IT), in which case browsers are left open."""
+    if is_disabled() or is_browser_block_exempt() or browser_allow_window_now():
         return False
     killed = False
     names_lower = [n.lower() for n in BROWSER_PROCESSES]
@@ -1835,7 +2253,7 @@ def kill_browsers():
     else:
         try:
             for name in BROWSER_PROCESSES:
-                result = subprocess.run(f'taskkill /F /IM "{name}" /T', shell=True, capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+                result = subprocess.run(f'taskkill /F /IM "{name}" /T', shell=True, capture_output=True, timeout=15, creationflags=subprocess.CREATE_NO_WINDOW)
                 if result.returncode == 0:
                     killed = True
                     log(f"Browser block: taskkill {name}")
@@ -1896,9 +2314,9 @@ def kill_games():
         try:
             # /T kills child processes too
             for name in GAME_PROCESSES:
-                subprocess.run(f'taskkill /F /IM "{name}" /T', shell=True, capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+                subprocess.run(f'taskkill /F /IM "{name}" /T', shell=True, capture_output=True, timeout=15, creationflags=subprocess.CREATE_NO_WINDOW)
             # generic albion kill for any remaining variant
-            subprocess.run('taskkill /F /FI "IMAGENAME eq Albion*" /T', shell=True, capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+            subprocess.run('taskkill /F /FI "IMAGENAME eq Albion*" /T', shell=True, capture_output=True, timeout=15, creationflags=subprocess.CREATE_NO_WINDOW)
             log("taskkill executed")
             killed = True
         except Exception as e:
@@ -1919,7 +2337,7 @@ def kill_games():
         for n in sorted(names):
             try:
                 if n.endswith(".exe"):
-                    r = subprocess.run(f'taskkill /F /IM "{n}" /T', shell=True, capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+                    r = subprocess.run(f'taskkill /F /IM "{n}" /T', shell=True, capture_output=True, timeout=15, creationflags=subprocess.CREATE_NO_WINDOW)
                     if r.returncode == 0:
                         killed = True
                         log(f"Sweep: taskkill {n} (elevated/inaccessible)")
@@ -1929,7 +2347,7 @@ def kill_games():
             try:
                 base = fam[:-1].lower()
                 if any(base in n for n in names):
-                    r = subprocess.run(f'taskkill /F /FI "IMAGENAME eq {fam}" /T', shell=True, capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+                    r = subprocess.run(f'taskkill /F /FI "IMAGENAME eq {fam}" /T', shell=True, capture_output=True, timeout=15, creationflags=subprocess.CREATE_NO_WINDOW)
                     if r.returncode == 0:
                         killed = True
                         log(f"Sweep: taskkill family {fam}")
@@ -2012,7 +2430,7 @@ def record_game_presence(games_now):
                 log(f"GAME STOP {s.get('game')} at {now_s}")
         for g in sorted(current):
             if g not in open_now:
-                sessions.append({"game": g, "start": now_s, "end": None})
+                sessions.append({"game": g, "start": now_s, "end": None, "user": _current_user()})
                 changed = True
                 log(f"GAME START {g} at {now_s}")
         if len(sessions) > SESSION_KEEP:
@@ -2158,6 +2576,9 @@ def main_loop():
         if APP_DISABLED:
             log("Startup: disabled for today (Ctrl+Alt+D) - will auto re-enable tomorrow")
 
+    # Write an initial heartbeat so the monitor shows this machine immediately.
+    write_status(state, None)
+
     last_tick = time.monotonic()
     last_log_minute = -1
     while not _shutdown.is_set():
@@ -2232,6 +2653,7 @@ def main_loop():
             except Exception as e:
                 log(f"session record error: {e}")
             running = len(games_running) > 0
+            over_limit = False
 
             if running:
                 # If already over limit -> block immediately
@@ -2311,9 +2733,34 @@ def main_loop():
                 # Small optimization: if not running, don't save every loop
                 pass
 
+            # Usage history (per game/app + per user), persisted across days for the
+            # monitor's daily/weekly charts. Game time is credited while actually
+            # playing (under the limit); browser time is credited whenever a browser
+            # is open during an allow-window / on an exempt PC (so school-IT browsing
+            # shows up too). This is a separate metric from the shared budget.
+            try:
+                browsers_now = []
+                if browser_allow_window_now() or is_browser_block_exempt():
+                    browsers_now = get_running_browsers()
+                hist_games = games_running if (running and not over_limit) else []
+                if hist_games or browsers_now:
+                    with _history_lock:
+                        hist = load_history()
+                        credit_history(hist, today.isoformat(), credit, hist_games, _current_user(), browsers_now)
+                        save_history(hist)
+            except Exception as e:
+                log_warn(f"history credit error: {e}")
+
             # Handle midnight reset: if date changed while sleeping, next iteration will reset via load_state
             # Cadence compensation: scans cost 1-2s, so wait only the remainder to
             # keep a true 5s tick (otherwise kids silently get extra time).
+            # Refresh the heartbeat every tick so status.json always reflects the
+            # in-memory truth (used_seconds, running games, recent errors).
+            try:
+                write_status(state, games_running)
+            except Exception:
+                pass
+
             _shutdown.wait(max(0.1, POLL_INTERVAL_SEC - (time.time() - tick_start)))
 
         except KeyboardInterrupt:
@@ -2330,11 +2777,15 @@ def main_loop():
     try:
         with _state_lock:
             save_state(state)
+        write_status(state, None)
         log(f"Shutdown: flushed today's time ({format_minutes(state.get('used_seconds', 0))} used)")
     except Exception as e:
         log(f"Shutdown flush skipped: {e}")
 
 if __name__ == "__main__":
+    # Capture any uncaught exception (main + worker threads) into the log/status.
+    _install_excepthooks()
+
     # Desktop icon (--show-time) just starts the normal visible app. Window visible = running.
     # Silent update check only (no popup); result goes to limiter.log and window version label.
     if "--show-time" in sys.argv or "--time" in sys.argv:
