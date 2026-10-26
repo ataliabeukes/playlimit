@@ -45,8 +45,10 @@ jobs:
           Write-Host "__version__ line = $(Select-String -Path albion_limiter.py -Pattern '^__version__' | Select-Object -First 1)"
 
       - name: Build PlayLimit.exe
+        # Use `python` (the setup-python 3.12 on PATH where PyInstaller was installed),
+        # NOT `py` — the py launcher may resolve to a different Python on the runner.
         run: >
-          py -m PyInstaller --onefile --noconsole --name PlayLimit
+          python -m PyInstaller --onefile --noconsole --name PlayLimit
           --icon playlimit.ico --version-file version_info.txt
           --distpath dist --workpath build --specpath .
           --hidden-import pystray --hidden-import PIL --hidden-import psutil
