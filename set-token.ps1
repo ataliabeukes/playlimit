@@ -10,7 +10,7 @@ Write-Host ""
 Write-Host "Get a token first:"
 Write-Host "  GitHub -> Settings -> Developer settings -> Personal access tokens"
 Write-Host "  -> Fine-grained tokens -> Generate new token"
-Write-Host "  Resource owner: beukes2"
+Write-Host "  Resource owner: ataliabeukes"
 Write-Host "  Repository access: Only select repositories -> playlimit-logs"
 Write-Host "  Permissions: Contents = Read and write"
 Write-Host "  Expiration: your choice (write the date down to rotate later)"
@@ -45,7 +45,7 @@ try {
 Write-Host ""
 Write-Host ("Token saved ($($token.Length) chars) -> $tokenFile") -ForegroundColor Green
 Write-Host "Restart PlayLimit (or press Ctrl+Shift+D then start it again) and the"
-Write-Host "logs will upload to: https://github.com/beukes2/playlimit-logs/tree/main/logs"
+Write-Host "logs will upload to: https://github.com/ataliabeukes/playlimit-logs/tree/main/logs"
 Write-Host ""
 Write-Host "You can verify in a minute with:"
 Write-Host '  Select-String -Path C:\ProgramData\AlbionLimiter\limiter.log -Pattern "LogShip"'

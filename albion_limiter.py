@@ -20,7 +20,7 @@ import threading
 import collections
 from pathlib import Path
 
-__version__ = "1.7.2"
+__version__ = "1.7.3"
 APP_NAME = "PlayLimit"
 
 # ---------- CONFIG ----------
@@ -205,7 +205,7 @@ _APP_START_EPOCH = time.time()
 # verify -> stage -> one clean hop (helper swaps files after we exit, relaunches).
 # Strict version increase + verified hash = converges, no respawn storm possible.
 AUTO_UPDATE_ENABLED = True
-REPO_RAW_BASE = "https://raw.githubusercontent.com/beukes2/playlimit/master"
+REPO_RAW_BASE = "https://raw.githubusercontent.com/ataliabeukes/playlimit/master"
 LIVE_EXE = DATA_DIR / "PlayLimit.exe"
 STAGED_EXE = DATA_DIR / "PlayLimit.staged.exe"
 STAGED_VER = DATA_DIR / "PlayLimit.staged.ver"
@@ -1543,10 +1543,10 @@ def force_update_check():
 
 # ---------- GITHUB LOG SHIPPING ----------
 # Every running copy periodically uploads its log so the parent PC can read all
-# machines' logs from one place: https://github.com/beukes2/playlimit-logs/tree/master/logs
+# machines' logs from one place: https://github.com/ataliabeukes/playlimit-logs/tree/main/logs
 # Auth: a fine-grained PAT (contents:write on playlimit-logs ONLY) lives in a local
 # file created by the parent on each machine - NEVER baked into the exe/repo.
-LOG_REPO = "beukes2/playlimit-logs"
+LOG_REPO = "ataliabeukes/playlimit-logs"
 TOKEN_FILE = DATA_DIR / "github_token.txt"
 LOG_UPLOAD_EVERY_SEC = 600            # full log tail (bulky) - every 10 min
 LOG_UPLOAD_MAX_BYTES = 200 * 1024

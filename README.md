@@ -307,7 +307,7 @@ directly in your browser.
 
 **Open it:** double-click `monitor/dashboard.html` (or host it anywhere static).
 On first run it asks for:
-- the logs repo (`beukes2/playlimit-logs`), and
+- the logs repo (`ataliabeukes/playlimit-logs`), and
 - a GitHub **fine-grained, read-only** token (Contents → **Read-only**, scoped to
   **only** the logs repo). This is different from the machines' write token — the
   dashboard never needs write access. The token is stored only in that browser's
@@ -341,20 +341,20 @@ token needed. Handy for a quick look or for testing UI changes.
 ## Remote Logs (read all machines from this PC)
 
 Every running copy (v1.4.1+) uploads its log to the **private** repo
-`beukes2/playlimit-logs` under `logs/<HOSTNAME>-<date>.log` — first upload ~60s
+`ataliabeukes/playlimit-logs` under `logs/<HOSTNAME>-<date>.log` — first upload ~60s
 after start, then every 10 min. Since **v1.7.0** each copy also ships a
 machine-readable heartbeat to `status/<HOSTNAME>.json` every ~2 min (this is what
 the dashboard reads). Read the logs from this PC with:
 ```powershell
-gh repo clone beukes2/playlimit-logs "$env:TEMP\playlimit-logs" 2>$null
+gh repo clone ataliabeukes/playlimit-logs "$env:TEMP\playlimit-logs" 2>$null
 Get-ChildItem "$env:TEMP\playlimit-logs\logs" | Sort-Object LastWriteTime -Descending
 Get-Content "$env:TEMP\playlimit-logs\logs\<HOST>-<date>.log" -Tail 30
 ```
-Or browse: `https://github.com/beukes2/playlimit-logs/tree/master/logs`
+Or browse: `https://github.com/ataliabeukes/playlimit-logs/tree/main/logs`
 
 Setup (parent does this once per machine — the token is NEVER in the repo/exe):
 1. GitHub → Settings → Developer settings → Personal access tokens → **Fine-grained tokens** → Generate new token
-2. Resource owner: beukes2, repository access: **Only select repositories → playlimit-logs**, permissions: **Contents → Read and write**, expiry: 1 year (note the date to rotate)
+2. Resource owner: ataliabeukes, repository access: **Only select repositories → playlimit-logs**, permissions: **Contents → Read and write**, expiry: 1 year (note the date to rotate)
 3. As Admin on the machine, save it (no extra spaces/newlines) to `C:\ProgramData\AlbionLimiter\github_token.txt`
 4. Restart PlayLimit — log shows `LogShip: token found`, next upload within ~60s
 5. No token file = shipping silently off. The token can only touch the logs repo, nothing else.

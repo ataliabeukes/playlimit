@@ -123,7 +123,7 @@
   <h2>PlayLimit Monitor — setup</h2>
   <p class="meta">Reads the private logs repo directly in your browser. Nothing is sent anywhere except GitHub. The token is stored only in this browser's localStorage.</p>
   <label>Logs repository (<code>owner/name</code>)</label>
-  <input id="s-repo" value="beukes2/playlimit-logs" />
+  <input id="s-repo" value="ataliabeukes/playlimit-logs" />
   <label>GitHub token (fine-grained, <b>read-only</b> Contents on this repo)</label>
   <input id="s-token" type="password" placeholder="github_pat_..." />
   <div class="hint">
@@ -543,7 +543,7 @@ function setInterval_(ms) {
 function showSetup(prefillErr) {
   document.getElementById("app").hidden = true;
   const s = document.getElementById("setup"); s.hidden = false;
-  document.getElementById("s-repo").value = cfg.repo || "beukes2/playlimit-logs";
+  document.getElementById("s-repo").value = cfg.repo || "ataliabeukes/playlimit-logs";
   document.getElementById("s-token").value = cfg.token || "";
   const se = document.getElementById("s-err");
   se.hidden = !prefillErr; if (prefillErr) se.textContent = prefillErr;

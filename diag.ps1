@@ -78,7 +78,7 @@ foreach ($l in $links) {
 Line "GitHub reachability / remote version"
 # Use whatever exe is present to ask GitHub for the published version
 try {
-    $req = [System.Net.WebRequest]::Create("https://raw.githubusercontent.com/beukes2/playlimit/master/version.txt")
+    $req = [System.Net.WebRequest]::Create("https://raw.githubusercontent.com/ataliabeukes/playlimit/master/version.txt")
     $req.Timeout = 15000
     $resp = $req.GetResponse()
     $sr = New-Object System.IO.StreamReader($resp.GetResponseStream())
