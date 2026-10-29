@@ -47,6 +47,15 @@ executable path for parent process"* before any app code runs. 6.22.0 is the new
 release without that check. Do **not** bump past 6.22.0 without re-testing an elevated
 launch on a real Windows box.
 
+## Never remove `--selfcheck` (update canary contract)
+
+The updater runs the *staged* exe as `PlayLimit.exe --selfcheck` before committing a
+hop, and only hops if it exits 0 and writes a fresh `selfcheck.json` whose version
+matches `version.txt`. This is a **cross-version contract**: the running version
+canaries the *next* version, so `--selfcheck` must stay supported (and fast,
+side-effect-free: no mutex/install/threads/network) in **every** future build.
+Removing or breaking it would make all future updates fail the canary and never apply.
+
 ## Commits
 
 Commits are GPG-signed by the maintainer. Prepare the working tree and hand over the

@@ -55,6 +55,45 @@ Why the old machine kept old code: previous versions ran from `C:\Program Files\
 (which standard users cannot overwrite) and only *staged* downloads without ever
 switching. v1.4.0 runs from `%ProgramData%` and hops automatically.
 
+### Safe updates: self-check canary + quarantine (v1.7.2+)
+
+A verified SHA256 only proves the bytes downloaded intact — **not** that the new exe
+actually runs. So before the hop deletes the working exe, the updater runs the staged
+exe once as a **canary**:
+
+```
+PlayLimit.exe --selfcheck
+```
+
+`--selfcheck` starts, writes a tiny `selfcheck.json` heartbeat with its **real**
+`__version__`, and exits `0`. The old process only commits the hop if the canary
+(a) exits 0 within 30 s **and** (b) wrote a fresh heartbeat whose version matches the
+`version.txt` we're updating to. This catches two otherwise-silent failures:
+
+- a new exe that **won't launch at all** (e.g. a bootloader/security abort) — the
+  canary never exits 0, so we keep the old version; and
+- a **mislabeled/stale** exe whose real version ≠ `version.txt` (which would make a
+  client "update" forever without advancing) — the version mismatch fails the canary.
+
+On failure the target version is **quarantined** (after `MAX_UPDATE_FAILS`): the bad
+staged files are deleted, the error is logged + shipped, and the updater stops
+re-downloading/hopping that version until `version.txt` moves to something else. The
+app simply keeps running the last working version. The quarantine state is exposed in
+`status.json` (`update_guard`) and shown as a red banner on the machine's dashboard card.
+
+### Catching a broken release remotely (v1.7.2+)
+
+Two extra signals make a bad deploy visible instead of silent:
+
+- **Startup heartbeat** — the moment a version launches it ships `status.json` once
+  immediately (not just on the periodic timer), so you can see "vX came up at HH:MM".
+- **Flush-on-crash** — the global exception hooks push `status.json` + the log tail
+  right before the process dies, so a fatal error reports itself instead of vanishing.
+
+(Both require log shipping to be on, i.e. `github_token.txt` present — see *Remote
+Logs*. A failure that prevents the exe from starting **at all** can't self-report;
+that shows up as the host going offline on the dashboard right after a version bump.)
+
 Build + publish a new version (example v1.4.0):
 ```powershell
 # IMPORTANT: pin PyInstaller to 6.22.0. 6.22.1+ adds a onefile parent-process
@@ -74,7 +113,7 @@ git push
 
 > **Versioning policy (see `AGENTS.md`):** bump the version on *every* change —
 > `__version__`, `version_info.txt`, and `version.txt` in lockstep. All are now at
-> `1.7.1`. **Before releasing/merging a `version.txt` bump you must rebuild**
+> `1.7.2`. **Before releasing/merging a `version.txt` bump you must rebuild**
 > `dist/PlayLimit.exe` + `dist/PlayLimit.exe.sha256` on Windows and commit them in
 > the same change — otherwise clients "update" to the stale exe still in `dist/`.
 
@@ -217,6 +256,7 @@ Written atomically every poll (and on startup/shutdown) for the monitor:
   "psutil": true, "browser_block": true, "browser_allow_reason": null,
   "recent_issues": [{ "ts": "...", "level": "WARN", "msg": "..." }],
   "error_count": 0, "warn_count": 1,
+  "update_guard": {},
   "today": { "total_sec": 1234, "per_game": { "albion-online.exe": 1234 }, "per_user": { "ethan": 1234 } },
   "week": {
     "total_sec": 18000,

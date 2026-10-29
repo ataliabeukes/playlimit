@@ -51,6 +51,11 @@
   .b-block { background: rgba(255,93,93,.16); color: var(--red); }
   .b-disabled { background: rgba(107,118,148,.2); color: var(--grey); }
   .b-offline { background: rgba(255,93,93,.14); color: var(--red); border: 1px dashed var(--red); }
+  .guard-banner {
+    margin: 8px 0 2px; padding: 8px 10px; border-radius: 8px; font-size: 12.5px;
+    font-weight: 600; background: rgba(255,93,93,.14); color: var(--red);
+    border: 1px solid rgba(255,93,93,.5);
+  }
   .bar { height: 10px; background: var(--panel2); border-radius: 999px; overflow: hidden; }
   .bar > i { display: block; height: 100%; border-radius: 999px; transition: width .4s ease; }
   .time-line { display: flex; justify-content: space-between; align-items: baseline; }
@@ -225,6 +230,7 @@ function demoStats() {
       sessions: [{ game: "minecraft.windows.exe", start: "11:00", end: null, user: "mia" }],
       psutil: true, browser_block: true, error_count: 1, warn_count: 0,
       recent_issues: [{ ts: "2026-10-25T12:00:11", level: "ERROR", msg: "UNCAUGHT exception in thread 'TrayIcon'" }],
+      update_guard: { ver: "1.7.1", count: 2, reason: "staged exe reports v1.6.9, expected v1.7.1 (mislabeled/stale binary)", last_fail_ts: now - 600 },
       today: { total_sec: 7200, per_game: { "minecraft.windows.exe": 7200 }, per_user: { mia: 7200 } },
       week: week(d => [
         { "minecraft.windows.exe": 3600 },
@@ -329,6 +335,10 @@ function card(s) {
   const errBadge = s.error_count ? `<span class="pill" style="color:var(--red)">${s.error_count} err</span>` : "";
   const warnBadge = s.warn_count ? `<span class="pill" style="color:var(--amber)">${s.warn_count} warn</span>` : "";
   const allowPill = s.browser_allow_reason ? `<span class="pill" style="color:var(--amber)" title="${esc(s.browser_allow_reason)}">browser allowed now</span>` : "";
+  const g = s.update_guard || {};
+  const guardBanner = g.ver
+    ? `<div class="guard-banner">⚠ Update to v${esc(g.ver)} refused (failed ${g.count || 1}×) — still on v${esc(s.version)}. ${esc(g.reason || "")}</div>`
+    : "";
   return `
   <div class="card ${stale ? "stale" : ""}">
     <div class="card-top">
@@ -336,6 +346,7 @@ function card(s) {
       <span class="ver">v${esc(s.version)}</span>
       <span class="badge ${st.cls}">${st.label}</span>
     </div>
+    ${guardBanner}
     <div>
       <div class="time-line">
         <span class="big">${fmtDur(s.used_sec)}</span>

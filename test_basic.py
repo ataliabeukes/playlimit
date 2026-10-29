@@ -34,11 +34,15 @@ class _TempDataDir(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         d = Path(self._tmp.name)
-        self._saved = {k: getattr(al, k) for k in ("DATA_DIR", "STATE_FILE", "STATUS_FILE", "LOG_FILE")}
+        self._saved = {k: getattr(al, k) for k in (
+            "DATA_DIR", "STATE_FILE", "STATUS_FILE", "LOG_FILE",
+            "SELFCHECK_FILE", "UPDATE_GUARD_FILE")}
         al.DATA_DIR = d
         al.STATE_FILE = d / "state.json"
         al.STATUS_FILE = d / "status.json"
         al.LOG_FILE = d / "limiter.log"
+        al.SELFCHECK_FILE = d / "selfcheck.json"
+        al.UPDATE_GUARD_FILE = d / "update_guard.json"
         # reset the in-memory issue buffer between tests
         with al._errors_lock:
             al._recent_issues.clear()
@@ -363,6 +367,74 @@ class TestStatusSummaries(_TempDataDir):
         st = al.record_game_presence(["albion-online.exe"])
         self.assertIn("user", st["sessions"][0])
         self.assertTrue(st["sessions"][0]["user"])
+
+
+class TestSelfCheck(_TempDataDir):
+    """The --selfcheck canary heartbeat + its pure validator."""
+
+    def test_write_and_validate_roundtrip(self):
+        self.assertTrue(al._write_selfcheck_heartbeat())
+        self.assertTrue(al.SELFCHECK_FILE.exists())
+        ok, reason = al._validate_selfcheck(al.__version__)
+        self.assertTrue(ok, reason)
+
+    def test_missing_heartbeat_fails(self):
+        ok, reason = al._validate_selfcheck(al.__version__)
+        self.assertFalse(ok)
+        self.assertIn("no selfcheck heartbeat", reason)
+
+    def test_version_mismatch_fails(self):
+        # Mislabeled/stale binary: real version differs from what version.txt claims.
+        al._write_selfcheck_heartbeat()  # writes al.__version__
+        ok, reason = al._validate_selfcheck("99.99.99")
+        self.assertFalse(ok)
+        self.assertIn("mislabeled/stale", reason)
+
+    def test_stale_heartbeat_fails(self):
+        al.SELFCHECK_FILE.write_text(json.dumps({
+            "version": al.__version__, "ok": True, "ts": 1000}), encoding="utf-8")
+        # Evaluate far in the future so the heartbeat is considered stale.
+        ok, reason = al._validate_selfcheck(al.__version__, now=1000 + al.CANARY_FRESH_SEC + 60)
+        self.assertFalse(ok)
+        self.assertIn("stale", reason)
+
+
+class TestUpdateGuard(_TempDataDir):
+    """Quarantine logic that stops an endless re-update loop on a bad target."""
+
+    def test_quarantine_increments_then_blocks(self):
+        blocked, _ = al._guard_blocks("1.7.0")
+        self.assertFalse(blocked)
+        al._quarantine_version("1.7.0", "reports 1.6.9")
+        blocked, _ = al._guard_blocks("1.7.0")   # 1 failure < MAX_UPDATE_FAILS (2)
+        self.assertFalse(blocked)
+        al._quarantine_version("1.7.0", "reports 1.6.9")
+        blocked, reason = al._guard_blocks("1.7.0")  # 2 failures => blocked
+        self.assertTrue(blocked)
+        self.assertIn("1.6.9", reason)
+
+    def test_new_target_resets_counter(self):
+        al._quarantine_version("1.7.0", "bad")
+        al._quarantine_version("1.7.0", "bad")
+        self.assertTrue(al._guard_blocks("1.7.0")[0])
+        # A different target version is unrelated and starts fresh.
+        self.assertFalse(al._guard_blocks("1.8.0")[0])
+        al._quarantine_version("1.8.0", "bad")
+        self.assertFalse(al._guard_blocks("1.8.0")[0])  # only 1 failure so far
+
+    def test_clear_quarantine(self):
+        al._quarantine_version("1.7.0", "bad")
+        al._quarantine_version("1.7.0", "bad")
+        self.assertTrue(al._guard_blocks("1.7.0")[0])
+        al._clear_quarantine("1.7.0")
+        self.assertFalse(al._guard_blocks("1.7.0")[0])
+        self.assertEqual(al._load_update_guard(), {})
+
+    def test_status_exposes_update_guard(self):
+        al._quarantine_version("1.7.0", "reports 1.6.9")
+        st = al.build_status(state={"date": datetime.date.today().isoformat(), "used_seconds": 0}, games_now=[])
+        self.assertIn("update_guard", st)
+        self.assertEqual(st["update_guard"].get("ver"), "1.7.0")
 
 
 if __name__ == "__main__":

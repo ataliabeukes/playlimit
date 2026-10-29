@@ -20,7 +20,7 @@ import threading
 import collections
 from pathlib import Path
 
-__version__ = "1.7.1"
+__version__ = "1.7.2"
 APP_NAME = "PlayLimit"
 
 # ---------- CONFIG ----------
@@ -211,6 +211,18 @@ STAGED_EXE = DATA_DIR / "PlayLimit.staged.exe"
 STAGED_VER = DATA_DIR / "PlayLimit.staged.ver"
 UPDATE_TIMEOUT_SEC = 20
 
+# --- Safe-update guard rails (canary + quarantine) ---
+# Before committing an update hop we launch the staged exe once in --selfcheck
+# mode and require it to (a) exit 0 and (b) write a fresh selfcheck heartbeat whose
+# version matches the version we think we are updating to. This catches a staged
+# exe that will not launch (e.g. bootloader abort) AND a mislabeled/stale exe whose
+# real __version__ does not match version.txt (which would otherwise loop forever).
+SELFCHECK_FILE = DATA_DIR / "selfcheck.json"
+UPDATE_GUARD_FILE = DATA_DIR / "update_guard.json"
+CANARY_TIMEOUT_SEC = 30          # max seconds to let a staged exe prove it launches
+CANARY_FRESH_SEC = 120           # selfcheck heartbeat must be newer than this
+MAX_UPDATE_FAILS = 2             # quarantine a target version after this many canary failures
+
 # Try to import psutil optionally
 try:
     import psutil
@@ -286,6 +298,10 @@ def _install_excepthooks():
             log_error("UNCAUGHT exception (main thread)", exc=exc)
         except Exception:
             pass
+        try:
+            _flush_telemetry("crash")  # ship before we die, don't wait for the timer
+        except Exception:
+            pass
     sys.excepthook = _main_hook
     try:
         def _thread_hook(args):
@@ -294,6 +310,10 @@ def _install_excepthooks():
             try:
                 tname = getattr(args.thread, "name", "?")
                 log_error(f"UNCAUGHT exception in thread '{tname}'", exc=args.exc_value)
+            except Exception:
+                pass
+            try:
+                _flush_telemetry("crash")
             except Exception:
                 pass
         threading.excepthook = _thread_hook
@@ -643,6 +663,7 @@ def build_status(state: dict = None, games_now=None) -> dict:
         "recent_issues": recent,
         "error_count": err_total,
         "warn_count": warn_total,
+        "update_guard": _load_update_guard(),
         "today": today_summary,
         "week": week_summary,
     }
@@ -782,6 +803,13 @@ def _check_and_stage_update():
                 pass
             return None
 
+        # Quarantined? A previous canary proved this target is broken/mislabeled.
+        # Skip re-downloading it until version.txt advances to something else.
+        blocked, qreason = _guard_blocks(remote_ver)
+        if blocked:
+            log_warn(f"Updater: v{remote_ver} is quarantined ({qreason}) - refusing to re-download/hop; staying on v{__version__}")
+            return None
+
         log(f"Updater: new version {remote_ver} available, downloading...")
         exe_data = _download_bytes(f"{REPO_RAW_BASE}/dist/PlayLimit.exe", 60)
         if not exe_data or len(exe_data) < 1024 * 100:
@@ -826,6 +854,10 @@ def _do_update_hop(staged_ver: str):
     No popups - progress goes to limiter.log and the new window title.
     """
     try:
+        # Canary gate: never delete the working exe for a staged one that cannot
+        # prove it launches and is the version it claims. Prevents brick/loop.
+        if not _canary_gate(staged_ver):
+            return
         _spawn_hop_helper_only(staged_ver)
         log(f"Updater: exiting to apply v{staged_ver} (old code replaced)")
         request_shutdown(f"applying update v{staged_ver}")
@@ -891,6 +923,173 @@ def _pending_staged_version():
         return sv
     except Exception:
         return None
+
+# ---------- SAFE-UPDATE GUARD (selfcheck canary + quarantine) ----------
+def _write_selfcheck_heartbeat():
+    """Write proof that THIS exe launched far enough to run Python/init.
+
+    Called only in --selfcheck mode. The canary in the *old* process reads this to
+    confirm the staged exe both launches and actually is the version it claims.
+    """
+    try:
+        SELFCHECK_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = SELFCHECK_FILE.with_name(SELFCHECK_FILE.name + ".tmp")
+        tmp.write_text(json.dumps({
+            "version": __version__,
+            "ts": int(time.time()),
+            "ok": True,
+            "pid": os.getpid(),
+        }), encoding="utf-8")
+        tmp.replace(SELFCHECK_FILE)
+        return True
+    except Exception:
+        return False
+
+def _run_selfcheck_mode():
+    """Minimal, side-effect-free canary entry point (invoked as `PlayLimit.exe --selfcheck`).
+
+    Proves the exe can start and reports its real __version__, then exits. Does NOT
+    touch the mutex, install, networking, threads, or the update machinery.
+    """
+    ok = _write_selfcheck_heartbeat()
+    try:
+        log(f"Selfcheck: v{__version__} launched OK (pid {os.getpid()})")
+    except Exception:
+        pass
+    sys.exit(0 if ok else 2)
+
+def _load_update_guard() -> dict:
+    try:
+        if UPDATE_GUARD_FILE.exists():
+            d = json.loads(UPDATE_GUARD_FILE.read_text(encoding="utf-8"))
+            if isinstance(d, dict):
+                return d
+    except Exception:
+        pass
+    return {}
+
+def _save_update_guard(d: dict):
+    try:
+        UPDATE_GUARD_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = UPDATE_GUARD_FILE.with_name(UPDATE_GUARD_FILE.name + ".tmp")
+        tmp.write_text(json.dumps(d, indent=2), encoding="utf-8")
+        tmp.replace(UPDATE_GUARD_FILE)
+    except Exception:
+        pass
+
+def _quarantine_version(ver: str, reason: str):
+    """Record a failed update target so we stop re-attempting (and re-downloading) it."""
+    g = _load_update_guard()
+    if g.get("ver") == ver:
+        g["count"] = int(g.get("count", 0) or 0) + 1
+    else:
+        g = {"ver": ver, "count": 1}
+    g["reason"] = (reason or "")[:300]
+    g["last_fail_ts"] = int(time.time())
+    g["from_version"] = __version__
+    _save_update_guard(g)
+    log_warn(f"Updater: quarantine v{ver} (fail #{g['count']}): {reason}")
+    return g
+
+def _guard_blocks(ver: str):
+    """(blocked, reason) - True once a target version has failed canary MAX_UPDATE_FAILS times."""
+    g = _load_update_guard()
+    if g.get("ver") == ver and int(g.get("count", 0) or 0) >= MAX_UPDATE_FAILS:
+        return True, g.get("reason", "")
+    return False, ""
+
+def _clear_quarantine(ver: str = None):
+    g = _load_update_guard()
+    if not g:
+        return
+    if ver is None or g.get("ver") == ver:
+        try:
+            UPDATE_GUARD_FILE.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+def _canary_ok(staged_path: Path, expected_ver: str):
+    """Launch the staged exe once as `--selfcheck` and confirm it really works.
+
+    Returns (ok: bool, reason: str). ok=True requires: the child exits 0 within
+    CANARY_TIMEOUT_SEC AND writes a fresh selfcheck heartbeat whose version equals
+    expected_ver. A stale/mislabeled exe (real __version__ != version.txt) fails here,
+    which is what stops the endless re-update loop.
+    """
+    # Clear any previous heartbeat so we only trust a freshly written one.
+    try:
+        SELFCHECK_FILE.unlink(missing_ok=True)
+    except Exception:
+        pass
+    CREATE_NO_WINDOW = 0x08000000
+    try:
+        proc = subprocess.run(
+            [str(staged_path), "--selfcheck"],
+            timeout=CANARY_TIMEOUT_SEC,
+            capture_output=True,
+            creationflags=CREATE_NO_WINDOW,
+        )
+    except subprocess.TimeoutExpired:
+        return False, f"selfcheck timed out after {CANARY_TIMEOUT_SEC}s (exe did not launch cleanly)"
+    except Exception as e:
+        return False, f"selfcheck could not be spawned: {e}"
+    if proc.returncode != 0:
+        return False, f"selfcheck exited with code {proc.returncode}"
+    # Must have a fresh heartbeat matching the expected version.
+    return _validate_selfcheck(expected_ver)
+
+def _validate_selfcheck(expected_ver: str, now: int = None):
+    """Pure check of the selfcheck heartbeat file against an expected version.
+
+    Split out from _canary_ok so it can be unit-tested without spawning a process.
+    Returns (ok, reason).
+    """
+    if now is None:
+        now = int(time.time())
+    try:
+        hb = json.loads(SELFCHECK_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return False, "no selfcheck heartbeat written (exe does not support --selfcheck or died early)"
+    if not hb.get("ok"):
+        return False, "selfcheck heartbeat not ok"
+    age = now - int(hb.get("ts", 0) or 0)
+    if age > CANARY_FRESH_SEC:
+        return False, f"selfcheck heartbeat stale ({age}s old)"
+    got = str(hb.get("version", "")).strip()
+    if got != str(expected_ver).strip():
+        return False, f"staged exe reports v{got}, expected v{expected_ver} (mislabeled/stale binary)"
+    return True, f"selfcheck OK (v{got})"
+
+def _canary_gate(staged_ver: str) -> bool:
+    """Gate every hop: only allow it if the staged exe passes the canary.
+
+    On failure: quarantine the version, delete the bad staged files, log+ship the
+    error, and return False so the caller keeps running the current (working) version.
+    """
+    try:
+        if not STAGED_EXE.exists():
+            return False
+        ok, reason = _canary_ok(STAGED_EXE, staged_ver)
+        if ok:
+            _clear_quarantine(staged_ver)
+            log(f"Updater: canary passed for v{staged_ver} - {reason}")
+            return True
+        log_error(f"Updater: canary FAILED for v{staged_ver} - {reason}. Staying on v{__version__}.")
+        _quarantine_version(staged_ver, reason)
+        # Drop the bad staged files so a pending-stage hop is not attempted again.
+        try:
+            STAGED_EXE.unlink(missing_ok=True)
+            STAGED_VER.unlink(missing_ok=True)
+        except Exception:
+            pass
+        try:
+            _flush_telemetry("canary-fail")
+        except Exception:
+            pass
+        return False
+    except Exception as e:
+        log_error(f"Updater: canary gate error for v{staged_ver}: {e}")
+        return False
 
 def _http_simple_update(show_ui=False):
     """Deprecated stub - superseded by _check_and_stage_update(). Kept so no caller breaks. Never spawns processes."""
@@ -1445,6 +1644,32 @@ def _upload_status_once() -> bool:
     if ok:
         log(f"LogShip: status heartbeat -> {path}")
     return ok
+
+def _flush_telemetry(reason: str = ""):
+    """Best-effort immediate push of status + log to the logs repo.
+
+    Used for (a) an instant startup heartbeat so a new version's launch is visible,
+    and (b) flush-on-crash so a fatal error reports itself before the process dies -
+    instead of waiting for the next periodic cycle that may never run. No-op (and
+    never raises) when there is no token or no network.
+    """
+    try:
+        if not _read_token():
+            return
+    except Exception:
+        return
+    try:
+        write_status()
+    except Exception:
+        pass
+    try:
+        _upload_status_once()
+    except Exception:
+        pass
+    try:
+        _upload_log_once()
+    except Exception:
+        pass
 
 def logship_thread():
     """Ship status.json (every STATUS_UPLOAD_EVERY_SEC) and the log tail (every
@@ -2569,6 +2794,14 @@ def main_loop():
     except Exception as e:
         log(f"Failed to start logship thread: {e}")
 
+    # Immediate startup heartbeat: push status+log once right now (in the background)
+    # so a just-launched version is visible on the dashboard without waiting for the
+    # first periodic cycle - the fastest signal that vX actually started up.
+    try:
+        threading.Thread(target=_flush_telemetry, args=("startup",), daemon=True, name="StartupHeartbeat").start()
+    except Exception as e:
+        log(f"Failed to start startup heartbeat: {e}")
+
     with _state_lock:
         state = load_state()
         save_state(state)
@@ -2786,6 +3019,11 @@ if __name__ == "__main__":
     # Capture any uncaught exception (main + worker threads) into the log/status.
     _install_excepthooks()
 
+    # Canary mode (spawned by the updater before a hop): prove this exe launches and
+    # report our real version, then exit. MUST be first - no mutex/install/threads.
+    if "--selfcheck" in sys.argv:
+        _run_selfcheck_mode()
+
     # Desktop icon (--show-time) just starts the normal visible app. Window visible = running.
     # Silent update check only (no popup); result goes to limiter.log and window version label.
     if "--show-time" in sys.argv or "--time" in sys.argv:
@@ -2839,9 +3077,15 @@ if __name__ == "__main__":
     try:
         sv = _pending_staged_version()
         if sv:
-            log(f"Updater: pending staged v{sv} at startup - hopping to latest before opening")
-            _spawn_hop_helper_only(sv)
-            sys.exit(0)
+            # Canary first: only hop if the staged exe proves it launches and is the
+            # version it claims. A bad/stale staged exe is quarantined+deleted here,
+            # and we fall through to run the current (working) version instead.
+            if _canary_gate(sv):
+                log(f"Updater: pending staged v{sv} at startup - hopping to latest before opening")
+                _spawn_hop_helper_only(sv)
+                sys.exit(0)
+            else:
+                log_error(f"Updater: pending staged v{sv} failed canary at startup - staying on v{__version__}")
     except SystemExit:
         raise
     except Exception as e:
