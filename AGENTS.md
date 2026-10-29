@@ -19,6 +19,9 @@ Use semantic-ish increments: **patch** (x.y.**Z**) for fixes/small tweaks,
 compiled artifacts are rebuilt to match it:
 
 1. On Windows, rebuild with the PyInstaller command in `README.md`.
+   Keep PyInstaller pinned to **6.22.0**: 6.22.1/6.22.2 add onefile
+   parent-process validation that can abort the update hop when `_PYI_*`
+   environment variables are inherited by the relaunched exe.
 2. Regenerate `dist/PlayLimit.exe.sha256`.
 3. Confirm `(Get-Item dist/PlayLimit.exe).VersionInfo.FileVersion` equals `version.txt`.
 4. Commit `version.txt` + `dist/PlayLimit.exe` + `dist/PlayLimit.exe.sha256` together.

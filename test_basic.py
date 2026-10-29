@@ -324,6 +324,19 @@ class TestDisableToggle(_TempDataDir):
         self.assertFalse(al.DISABLE_FLAG_FILE.exists())
 
 
+class TestUpdaterEnvironment(unittest.TestCase):
+    def test_clean_pyi_env_strips_private_onefile_vars(self):
+        os.environ["_PYI_TEST_VALUE"] = "1"
+        os.environ["PLAYLIMIT_KEEP_TEST"] = "1"
+        self.addCleanup(os.environ.pop, "_PYI_TEST_VALUE", None)
+        self.addCleanup(os.environ.pop, "PLAYLIMIT_KEEP_TEST", None)
+
+        env = al._clean_pyi_env()
+        self.assertNotIn("_PYI_TEST_VALUE", env)
+        self.assertEqual(env["PLAYLIMIT_KEEP_TEST"], "1")
+        self.assertEqual(env["PYINSTALLER_RESET_ENVIRONMENT"], "1")
+
+
 class TestHistory(_TempDataDir):
     def test_credit_accumulates_per_game_user_and_browser(self):
         h = {"days": {}}

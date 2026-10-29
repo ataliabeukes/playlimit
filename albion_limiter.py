@@ -20,7 +20,7 @@ import threading
 import collections
 from pathlib import Path
 
-__version__ = "1.7.2"
+__version__ = "1.7.3"
 APP_NAME = "PlayLimit"
 
 # ---------- CONFIG ----------
@@ -695,6 +695,19 @@ def _parse_ver(v: str):
     except Exception:
         return (0,)
 
+def _clean_pyi_env():
+    """Environment for launching another copy of this frozen onefile exe.
+
+    PyInstaller's onefile bootloader passes private _PYI_* variables to child
+    processes. If a replacement exe inherits them, PyInstaller >= 6.22.1 treats
+    it as a child of the old (already exited) process and aborts with
+    "Security validation failure: ... parent process ...". Strip them and set
+    the documented reset flag so the new exe starts as a fresh top-level app.
+    """
+    env = {k: v for k, v in os.environ.items() if not k.startswith("_PYI_")}
+    env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    return env
+
 def _download_bytes(url: str, timeout: int):
     """Download raw bytes or return None. No popups, log only."""
     try:
@@ -888,6 +901,10 @@ def _spawn_hop_helper_only(staged_ver: str):
     hoplog = str(HOP_LOG)
     script = (
         "param([int]$OldPid, [string]$Live, [string]$Staged, [string]$Sver, [string]$HopLog)\n"
+        "# Never pass PyInstaller's private onefile vars to the replacement exe:\n"
+        "# PyInstaller >=6.22.1 aborts with a parent-process security validation.\n"
+        "Get-ChildItem Env: | Where-Object { $_.Name -like '_PYI_*' } | Remove-Item -ErrorAction SilentlyContinue\n"
+        "$env:PYINSTALLER_RESET_ENVIRONMENT = '1'\n"
         "\"hop-start old=$OldPid at $(Get-Date -Format 'HH:mm:ss')\" | Out-File $HopLog -Append\n"
         "while (Get-Process -Id $OldPid -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 200 }\n"
         "\"old-gone, replacing live with staged\" | Out-File $HopLog -Append\n"
@@ -935,6 +952,7 @@ def _spawn_hop_helper_only(staged_ver: str):
          "-WindowStyle", "Hidden", "-File", str(HOP_HELPER_PS1),
          str(me), live, staged, sver, hoplog],
         creationflags=NEW_GROUP,
+        env=_clean_pyi_env(),
     )
     log(f"Updater: hop helper started for v{staged_ver} (see hop.log)")
 
@@ -1307,14 +1325,15 @@ def ensure_installed():
                         return
                 elif mv_live and mv_me and _parse_ver(mv_live) > _parse_ver(mv_me):
                     log(f"Install: canonical v{mv_live} is newer - hopping to it")
-                    subprocess.Popen([str(LIVE_EXE)],
-                                     creationflags=0x00000200, close_fds=True)
+                    subprocess.Popen([str(LIVE_EXE)], creationflags=0x00000200,
+                                     close_fds=True, env=_clean_pyi_env())
                     sys.exit(0)
                 # else same version: fall through and run (portable copy, still enforces)
             if LIVE_EXE.exists() and me != LIVE_EXE.resolve():
                 # Relaunch from canonical so task/shortcuts/updates all agree on one file
                 try:
-                    subprocess.Popen([str(LIVE_EXE)], creationflags=0x00000200, close_fds=True)
+                    subprocess.Popen([str(LIVE_EXE)], creationflags=0x00000200,
+                                     close_fds=True, env=_clean_pyi_env())
                     log("Install: relaunched from canonical location")
                 except Exception as e:
                     log(f"Install: relaunch failed ({e}) - running portable this session")
