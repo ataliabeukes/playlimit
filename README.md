@@ -9,7 +9,7 @@ Limits Albion Online playtime for kids:
 - **Browser block: Chrome/Edge/Firefox/Brave/Opera etc. are auto-closed**
 - **Scheduled browser exception: browsers are allowed Tuesdays 08:00–13:30 (school IT class)**
 - **Not closable by kids:** close button disabled, Ctrl+C ignored, auto-restarts if killed, runs as SYSTEM when possible
-- **Parent hotkeys: `Ctrl+Alt+T` +15 min, `Ctrl+Shift+D` DISABLE app** (resets tomorrow / creates disabled flag)
+- **Parent hotkeys: `Ctrl+Alt+T` +15 min, `Ctrl+Alt+D` toggle disable/re-enable, `Ctrl+Shift+D` disable + exit**
 
 ## How It Works
 
@@ -20,7 +20,7 @@ Limits Albion Online playtime for kids:
 - **Browser block:** any browser (`chrome.exe`, `msedge.exe`, `firefox.exe`, `brave.exe`, `opera.exe`, `vivaldi.exe`, `iexplore.exe`...) is terminated within 5 seconds
 - Uses Task Scheduler + Startup shortcut so it survives reboots
 - **Not closable:** console X disabled, `Ctrl+C`/close ignored, task set `AllowHardTerminate=$false` + `RestartCount 10` (restarts in 1 min if killed), tries to run as `SYSTEM` (standard users get Access Denied), `Protect: anti-close enabled`
-- **Disable:** `Ctrl+Shift+D` creates `%ProgramData%\AlbionLimiter\disabled.flag` and disables task — delete flag + reboot to re-enable
+- **Disable:** `Ctrl+Alt+D` toggles disable/re-enable for today while the app keeps running; `Ctrl+Shift+D` disables + exits. Both clear automatically at midnight — no `disabled.flag` and no scheduled-task changes
 
 ## Files
 
@@ -55,7 +55,7 @@ Why the old machine kept old code: previous versions ran from `C:\Program Files\
 (which standard users cannot overwrite) and only *staged* downloads without ever
 switching. v1.4.0 runs from `%ProgramData%` and hops automatically.
 
-Build + publish a new version (example v1.7.1):
+Build + publish a new version (example v1.7.2):
 ```powershell
 py -m PyInstaller --noconfirm --clean --onefile --noconsole --name PlayLimit --icon playlimit.ico --version-file version_info.txt --distpath dist --workpath build --specpath . --hidden-import pystray --hidden-import PIL --hidden-import psutil --splash splash.png albion_limiter.py
 $sha = (Get-FileHash dist\PlayLimit.exe -Algorithm SHA256).Hash
@@ -67,10 +67,10 @@ $sha = (Get-FileHash dist\PlayLimit.exe -Algorithm SHA256).Hash
 # both must print the same value before you commit
 
 git add albion_limiter.py version.txt version_info.txt dist/PlayLimit.exe dist/PlayLimit.exe.sha256
-git commit -m "v1.7.1 ..."
+git commit -m "v1.7.2 ..."
 git push
 ```
-`version.txt` must contain the new version (e.g. `1.7.1`) or clients will not pick it up.
+`version.txt` must contain the new version (e.g. `1.7.2`) or clients will not pick it up.
 Never commit a `version.txt` bump without the rebuilt `dist/PlayLimit.exe`: clients
 would download the old binary, see the same old version at startup, and repeat forever.
 
@@ -106,11 +106,18 @@ would download the old binary, see the same old version at startup, and repeat f
 - Popup confirms: *"Bonus Added! New total: X min"*
 - If game was already blocked, unblocks it immediately
 
-**`Ctrl+Shift+D`** — **DISABLE PlayLimit** (parent override):
-- Instantly stops all blocking (Albion + browsers allowed)
-- Creates `%ProgramData%\AlbionLimiter\disabled.flag` and disables scheduled task `AlbionLimiter`
-- Console shows `*** DISABLED ***`
-- To re-enable: `Remove-Item C:\ProgramData\AlbionLimiter\disabled.flag; Enable-ScheduledTask -TaskName AlbionLimiter` or delete flag and reboot
+**`Ctrl+Alt+D`** — **toggle disable / re-enable for today** (app keeps running):
+- First press: instantly stops all blocking (Albion + browsers allowed), window/console shows `*** DISABLED ***`
+- Press the **same combo again**: re-enables all limits immediately, no restart needed
+- While disabled, `Ctrl+Alt+T` is ignored
+- Clears automatically at midnight
+
+**`Ctrl+Shift+D`** — **disable + exit** (parent override):
+- If enabled: disables for today and exits the app
+- If already disabled (e.g. after `Ctrl+Alt+D`): re-enables and keeps running instead of exiting
+- If the app exited, relaunch **PlayLimit Time**; it stays disabled for that day until you press `Ctrl+Alt+D`
+
+There is no `disabled.flag` and the scheduled task is never disabled by these hotkeys.
 
 Config in `albion_limiter.py`:
 ```python

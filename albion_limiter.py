@@ -20,7 +20,7 @@ import threading
 import collections
 from pathlib import Path
 
-__version__ = "1.7.1"
+__version__ = "1.7.2"
 APP_NAME = "PlayLimit"
 
 # ---------- CONFIG ----------
@@ -151,7 +151,7 @@ def is_browser_block_exempt() -> bool:
     return False
 
 # App control
-APP_DISABLED = False  # set True by Ctrl+Shift+D hotkey
+APP_DISABLED = False  # set by Ctrl+Alt+D / Ctrl+Shift+D hotkeys
 DISABLE_FLAG_FILE = None  # set after DATA_DIR known
 
 # State / log locations
@@ -342,39 +342,42 @@ def is_disabled() -> bool:
     # No persistent flag - disabled is in-memory only for this session, always starts enabled
     return APP_DISABLED
 
-def disable_app():
-    """Ctrl+Shift+D: disable for the rest of today and exit (auto re-enables tomorrow).
+def set_disabled_for_today(disabled: bool):
+    """Persist/clear today's disabled_date and update the in-memory flag.
 
-    The scheduled task is deliberately NOT disabled: that would stop the app from
-    ever starting again to clear the flag at midnight. The task stays enabled so
-    the app comes back at next logon and re-enables itself on the new date.
+    Single source of truth for both disable hotkeys:
+      * disabled=True  -> enforcement off until midnight
+      * disabled=False -> enforcement back on immediately
+    The scheduled task is never disabled, so the app can always start again and
+    clear the date after midnight. Ctrl+Alt+D toggles this value.
     """
     global APP_DISABLED
-    APP_DISABLED = True
-    log("=== PlayLimit DISABLED for today by Ctrl+Shift+D - exiting (auto re-enables tomorrow) ===")
+    APP_DISABLED = bool(disabled)
     try:
         with _state_lock:
             st = load_state()
-            st["disabled_date"] = datetime.date.today().isoformat()
+            st["disabled_date"] = datetime.date.today().isoformat() if disabled else None
             save_state(st)
-        log("Saved disabled_date = today (clears automatically on the next day)")
     except Exception as e:
         log(f"Could not save disabled_date: {e}")
+    if disabled:
+        log("=== PlayLimit DISABLED for today (Ctrl+Alt+D re-enables now; auto re-enables tomorrow) ===")
+    else:
+        log("=== PlayLimit RE-ENABLED for today (all limits active again) ===")
+
+def disable_app():
+    """Ctrl+Shift+D while enabled: disable for the rest of today and exit."""
+    set_disabled_for_today(True)
     request_shutdown("disabled via Ctrl+Shift+D")
 
 def enable_app():
-    global APP_DISABLED
-    APP_DISABLED = False
+    """Re-enable immediately (Ctrl+Alt+D, or Ctrl+Shift+D while already disabled)."""
+    set_disabled_for_today(False)
     try:
         if DISABLE_FLAG_FILE.exists():
             DISABLE_FLAG_FILE.unlink()
     except Exception:
         pass
-    try:
-        subprocess.run(["schtasks", "/Change", "/TN", "AlbionLimiter", "/ENABLE"], capture_output=True, timeout=10, creationflags=subprocess.CREATE_NO_WINDOW)
-    except Exception:
-        pass
-    log("PlayLimit re-enabled")
 
 def protect_process():
     """No-op now: app must be closable. Window visible = running, closed = fully gone."""
@@ -1591,7 +1594,8 @@ def add_bonus_time(seconds: int = BONUS_STEP_SEC):
         return state
 
 def hotkey_listener_thread():
-    """Global hotkeys: Ctrl+Alt+T -> +15 min, Ctrl+Shift+D -> disable+exit, Ctrl+Alt+D -> disable for today."""
+    """Global hotkeys: Ctrl+Alt+T -> +15 min, Ctrl+Alt+D -> toggle disable/re-enable,
+    Ctrl+Shift+D -> disable+exit (or re-enable if already disabled)."""
     global APP_DISABLED
     try:
         user32 = ctypes.windll.user32
@@ -1620,13 +1624,13 @@ def hotkey_listener_thread():
     if not ok2:
         log(f"Hotkey: RegisterHotKey Ctrl+Shift+D failed, error {kernel32.GetLastError()}")
     else:
-        log("Hotkey registered: Ctrl+Shift+D = disable for today + exit (auto re-enables tomorrow)")
+        log("Hotkey registered: Ctrl+Shift+D = disable for today + exit (re-enables if already disabled)")
 
     ok3 = user32.RegisterHotKey(None, HOTKEY_ID_CLOSE, MOD_CONTROL | MOD_ALT, VK_D)
     if not ok3:
         log(f"Hotkey: RegisterHotKey Ctrl+Alt+D failed, error {kernel32.GetLastError()}")
     else:
-        log("Hotkey registered: Ctrl+Alt+D = disable for today (auto re-enables tomorrow)")
+        log("Hotkey registered: Ctrl+Alt+D = toggle disable/re-enable for today")
 
     if not ok1 and not ok2 and not ok3:
         return
@@ -1654,21 +1658,25 @@ def hotkey_listener_thread():
                         import traceback
                         log(traceback.format_exc())
                 elif msg.wParam == HOTKEY_ID_DISABLE:
-                    log("Hotkey pressed: Ctrl+Shift+D - disable for today + exit")
                     try:
-                        disable_app()
+                        if is_disabled():
+                            log("Hotkey pressed: Ctrl+Shift+D - already disabled, re-enabling (staying open)")
+                            enable_app()
+                        else:
+                            log("Hotkey pressed: Ctrl+Shift+D - disable for today + exit")
+                            disable_app()
                     except Exception as e:
                         log(f"Disable hotkey error: {e}")
                 elif msg.wParam == HOTKEY_ID_CLOSE:
-                    log("Hotkey pressed: Ctrl+Alt+D - disabling for today (auto re-enables tomorrow, app keeps running)")
                     try:
-                        with _state_lock:
-                            st = load_state()
-                            st["disabled_date"] = datetime.date.today().isoformat()
-                            save_state(st)
-                        APP_DISABLED = True
+                        if is_disabled():
+                            log("Hotkey pressed: Ctrl+Alt+D - currently disabled, re-enabling")
+                            enable_app()
+                        else:
+                            log("Hotkey pressed: Ctrl+Alt+D - disabling for today (press again to re-enable)")
+                            set_disabled_for_today(True)
                     except Exception as e:
-                        log(f"Disable-for-today error: {e}")
+                        log(f"Disable hotkey error: {e}")
             user32.TranslateMessage(ctypes.byref(msg))
             user32.DispatchMessageW(ctypes.byref(msg))
     finally:
@@ -1690,8 +1698,8 @@ def console_thread():
         log("=" * 60)
         log(f" Weekday limit: {WEEKDAY_LIMIT_SEC//60} min | Weekend: {WEEKEND_LIMIT_SEC//60} min | Warning: {WARNING_BEFORE_SEC//60} min before")
         log(f" Hotkey: Ctrl+Alt+T = +15 min for today (resets tomorrow)")
-        log(f" Hotkey: Ctrl+Shift+D = disable for today + exit (auto re-enables tomorrow)")
-        log(f" Hotkey: Ctrl+Alt+D = disable for today (auto re-enables tomorrow)")
+        log(f" Hotkey: Ctrl+Alt+D = toggle disable/re-enable for today")
+        log(f" Hotkey: Ctrl+Shift+D = disable for today + exit (re-enables if already disabled)")
         if is_browser_block_exempt():
             log(f" Browser block: OFF on this PC (exempt) - your browsers will NOT be closed")
         else:
@@ -1725,7 +1733,7 @@ def console_thread():
             gstatus = ("RUNNING: " + ", ".join(games_now[:3])) if running else "not running"
             # Color not needed, plain text
             if is_disabled():
-                line = f"[{ts}] *** DISABLED *** | PlayLimit is OFF | Used {format_minutes(used)} | Left {format_minutes(remaining)} | Games {gstatus} | Browser block OFF | Press reboot or delete {DISABLE_FLAG_FILE} to re-enable"
+                line = f"[{ts}] *** DISABLED *** | PlayLimit is OFF | Used {format_minutes(used)} | Left {format_minutes(remaining)} | Games {gstatus} | Browser block OFF | Press Ctrl+Alt+D to re-enable (auto re-enables tomorrow)"
             elif is_browser_block_exempt():
                 line = f"[{ts}] {day_type} | Base {base//60}min + Bonus {bonus//60}min = {limit//60}min | Used {format_minutes(used)} | Left {format_minutes(remaining)} | Games {gstatus} {'(WARNED)' if warned else ''} | Browser OFF (exempt)"
             else:
@@ -1956,7 +1964,7 @@ def show_time_window():
         # Those all arrive as WM_CLOSE -> ignored here (logged only).
         # Parent exits via Ctrl+Shift+D hotkey or Task Manager as Admin (TerminateProcess
         # cannot be blocked); both do a full shutdown so no traces are left behind.
-        # Ctrl+Alt+D only disables enforcement for today (app keeps running).
+        # Ctrl+Alt+D toggles enforcement for today (app keeps running).
         # Register this root so request_shutdown() can destroy it from hotkeys.
         global _tk_root
         _tk_root = root
@@ -2572,7 +2580,7 @@ def main_loop():
         log(f"STATUS: ACTIVE - Browser block OFF on this PC (exempt) | Game limit ON")
     else:
         log(f"STATUS: ACTIVE - Browser block ON ({', '.join(BROWSER_PROCESSES)})")
-    log(f"Weekday limit: {WEEKDAY_LIMIT_SEC//60} min, Weekend: {WEEKEND_LIMIT_SEC//60} min, Warning: {WARNING_BEFORE_SEC//60} min before, Bonus step: {BONUS_STEP_SEC//60} min via Ctrl+Alt+T, Disable: Ctrl+Shift+D")
+    log(f"Weekday limit: {WEEKDAY_LIMIT_SEC//60} min, Weekend: {WEEKEND_LIMIT_SEC//60} min, Warning: {WARNING_BEFORE_SEC//60} min before, Bonus step: {BONUS_STEP_SEC//60} min via Ctrl+Alt+T, Disable/re-enable: Ctrl+Alt+D, Disable+exit: Ctrl+Shift+D")
     log(f"Watching: {', '.join(TARGET_PROCESSES)}")
     log(f"psutil available: {HAS_PSUTIL}")
 
@@ -2637,7 +2645,7 @@ def main_loop():
         save_state(state)
         APP_DISABLED = (state.get("disabled_date") == datetime.date.today().isoformat())
         if APP_DISABLED:
-            log("Startup: disabled for today (Ctrl+Alt+D) - will auto re-enable tomorrow")
+            log("Startup: disabled for today - press Ctrl+Alt+D to re-enable now (auto re-enables tomorrow)")
 
     # Write an initial heartbeat so the monitor shows this machine immediately.
     write_status(state, None)
@@ -2686,7 +2694,7 @@ def main_loop():
             if is_disabled():
                 # Still sleep and continue; console will show DISABLED
                 if int(time.time()) % 60 == 0:
-                    log("PlayLimit DISABLED for today - skipping all checks (auto re-enables tomorrow)")
+                    log("PlayLimit DISABLED for today - skipping all checks (Ctrl+Alt+D to re-enable; auto re-enables tomorrow)")
                 _shutdown.wait(POLL_INTERVAL_SEC)
                 continue
 
@@ -2839,6 +2847,14 @@ def main_loop():
     # disable), today's used time is already on disk - the restart loses nothing.
     try:
         with _state_lock:
+            # The disable hotkey writes disabled_date straight to disk, but the
+            # loop's in-memory `state` may predate that write. Re-read the disk
+            # value so a Ctrl+Shift+D shutdown cannot overwrite "disabled today"
+            # with None (which would silently re-enable on the next launch).
+            try:
+                state["disabled_date"] = load_state().get("disabled_date")
+            except Exception:
+                pass
             save_state(state)
         write_status(state, None)
         log(f"Shutdown: flushed today's time ({format_minutes(state.get('used_seconds', 0))} used)")

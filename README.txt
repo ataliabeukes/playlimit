@@ -63,9 +63,10 @@ Option B - Edit limits (edit albion_limiter.py in C:\Program Files\AlbionLimiter
   Change BONUS_STEP_SEC = 15*60
   Then restart task: Start-ScheduledTask AlbionLimiter
 
-Option C - Temporarily disable:
-  Open Task Scheduler -> Task Scheduler Library -> AlbionLimiter -> Disable
-  (Needs admin password)
+Option C - Toggle disable for today:
+  Ctrl+Alt+D toggles disable/re-enable while the app keeps running.
+  Ctrl+Shift+D disables for today and exits (relaunch PlayLimit Time, then Ctrl+Alt+D to re-enable).
+  Both clear automatically at midnight. No disabled.flag or scheduled-task change is used.
 
 FAQ
 ---

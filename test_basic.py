@@ -35,12 +35,14 @@ class _TempDataDir(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         d = Path(self._tmp.name)
         self._saved = {k: getattr(al, k) for k in
-                       ("DATA_DIR", "STATE_FILE", "STATUS_FILE", "LOG_FILE", "HISTORY_FILE")}
+                       ("DATA_DIR", "STATE_FILE", "STATUS_FILE", "LOG_FILE", "HISTORY_FILE",
+                        "DISABLE_FLAG_FILE")}
         al.DATA_DIR = d
         al.STATE_FILE = d / "state.json"
         al.STATUS_FILE = d / "status.json"
         al.LOG_FILE = d / "limiter.log"
         al.HISTORY_FILE = d / "history.json"
+        al.DISABLE_FLAG_FILE = d / "disabled.flag"
         # reset the in-memory issue buffer between tests
         with al._errors_lock:
             al._recent_issues.clear()
@@ -301,6 +303,25 @@ class TestBrowserAllowWindow(_TempDataDir):
     def test_reason_mentions_school_it(self):
         reason = al.browser_allow_window_now(datetime.datetime(2026, 10, 20, 9, 0))
         self.assertIn("School IT", reason)
+
+
+class TestDisableToggle(_TempDataDir):
+    def test_set_and_clear_disabled_date(self):
+        al.APP_DISABLED = False
+        al.set_disabled_for_today(True)
+        self.assertTrue(al.is_disabled())
+        self.assertEqual(al.load_state()["disabled_date"], datetime.date.today().isoformat())
+
+        al.set_disabled_for_today(False)
+        self.assertFalse(al.is_disabled())
+        self.assertIsNone(al.load_state()["disabled_date"])
+
+    def test_enable_app_clears_legacy_flag(self):
+        al.DISABLE_FLAG_FILE.write_text("stale", encoding="utf-8")
+        al.APP_DISABLED = True
+        al.enable_app()
+        self.assertFalse(al.is_disabled())
+        self.assertFalse(al.DISABLE_FLAG_FILE.exists())
 
 
 class TestHistory(_TempDataDir):
