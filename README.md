@@ -31,7 +31,7 @@ Limits Albion Online playtime for kids:
 | `install.ps1` | Installer (run as Administrator) |
 | `install.bat` | Batch wrapper for installer |
 | `uninstall.ps1` | Uninstaller (run as Administrator) |
-| `monitor/dashboard.html` | Remote monitoring dashboard — open locally in a browser |
+| `monitor/dashboard.html` | Remote monitoring dashboard - bundled into the exe and opened by the **Logs** button |
 | `test_matcher.py` | Game-detection matcher tests |
 | `test_basic.py` | Unit tests: limits, state, sessions, status, logging |
 | `README.txt` | Plain-text docs |
@@ -55,12 +55,12 @@ Why the old machine kept old code: previous versions ran from `C:\Program Files\
 (which standard users cannot overwrite) and only *staged* downloads without ever
 switching. v1.4.0 runs from `%ProgramData%` and hops automatically.
 
-Build + publish a new version (example v1.7.3):
+Build + publish a new version (example v1.7.4):
 ```powershell
 # Pin PyInstaller 6.22.0 for now: 6.22.1/6.22.2 added onefile parent-process
 # validation that aborts when the update hop inherits _PYI_* variables.
 py -m pip install "pyinstaller==6.22.0"
-py -m PyInstaller --noconfirm --clean --onefile --noconsole --name PlayLimit --icon playlimit.ico --version-file version_info.txt --distpath dist --workpath build --specpath . --hidden-import pystray --hidden-import PIL --hidden-import psutil --splash splash.png albion_limiter.py
+py -m PyInstaller --noconfirm --clean --onefile --noconsole --name PlayLimit --icon playlimit.ico --version-file version_info.txt --distpath dist --workpath build --specpath . --hidden-import pystray --hidden-import PIL --hidden-import psutil --splash splash.png --add-data "monitor/dashboard.html;monitor" albion_limiter.py
 $sha = (Get-FileHash dist\PlayLimit.exe -Algorithm SHA256).Hash
 "$sha  PlayLimit.exe" | Set-Content dist\PlayLimit.exe.sha256 -NoNewline
 
@@ -70,10 +70,11 @@ $sha = (Get-FileHash dist\PlayLimit.exe -Algorithm SHA256).Hash
 # both must print the same value before you commit
 
 git add albion_limiter.py version.txt version_info.txt dist/PlayLimit.exe dist/PlayLimit.exe.sha256
-git commit -m "v1.7.3 ..."
+git commit -m "v1.7.4 ..."
 git push
 ```
-`version.txt` must contain the new version (e.g. `1.7.3`) or clients will not pick it up.
+`version.txt` must contain the new version (e.g. `1.7.4`) or clients will not pick it up.
+`--add-data` bundles `monitor/dashboard.html` into the exe for the **Logs** button.
 Never commit a `version.txt` bump without the rebuilt `dist/PlayLimit.exe`: clients
 would download the old binary, see the same old version at startup, and repeat forever.
 
@@ -277,7 +278,10 @@ Example `state.json`:
 step) that shows every machine's live status by reading the private logs repo
 directly in your browser.
 
-**Open it:** double-click `monitor/dashboard.html` (or host it anywhere static).
+**Open it:** click the **Logs** button in the PlayLimit window (v1.7.4+), or
+double-click `monitor/dashboard.html` (or host it anywhere static). The Logs button
+opens a stable local copy at `%ProgramData%\AlbionLimiter\dashboard.html`, so the
+browser remembers your repo/token between runs.
 On first run it asks for:
 - the logs repo (`beukes2/playlimit-logs`), and
 - a GitHub **fine-grained, read-only** token (Contents → **Read-only**, scoped to

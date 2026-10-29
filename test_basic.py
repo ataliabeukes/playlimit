@@ -36,12 +36,13 @@ class _TempDataDir(unittest.TestCase):
         d = Path(self._tmp.name)
         self._saved = {k: getattr(al, k) for k in
                        ("DATA_DIR", "STATE_FILE", "STATUS_FILE", "LOG_FILE", "HISTORY_FILE",
-                        "DISABLE_FLAG_FILE")}
+                        "DASHBOARD_FILE", "DISABLE_FLAG_FILE")}
         al.DATA_DIR = d
         al.STATE_FILE = d / "state.json"
         al.STATUS_FILE = d / "status.json"
         al.LOG_FILE = d / "limiter.log"
         al.HISTORY_FILE = d / "history.json"
+        al.DASHBOARD_FILE = d / "dashboard.html"
         al.DISABLE_FLAG_FILE = d / "disabled.flag"
         # reset the in-memory issue buffer between tests
         with al._errors_lock:
@@ -322,6 +323,17 @@ class TestDisableToggle(_TempDataDir):
         al.enable_app()
         self.assertFalse(al.is_disabled())
         self.assertFalse(al.DISABLE_FLAG_FILE.exists())
+
+
+class TestDashboard(_TempDataDir):
+    def test_ensure_dashboard_file_copies_bundled_html(self):
+        p = al.ensure_dashboard_file()
+        self.assertIsNotNone(p)
+        self.assertEqual(p, al.DASHBOARD_FILE)
+        self.assertTrue(p.exists())
+        self.assertIn("PlayLimit Monitor", p.read_text(encoding="utf-8"))
+        # Second call is safe and keeps the same stable path.
+        self.assertEqual(al.ensure_dashboard_file(), p)
 
 
 class TestUpdaterEnvironment(unittest.TestCase):

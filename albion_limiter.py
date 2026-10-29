@@ -20,7 +20,7 @@ import threading
 import collections
 from pathlib import Path
 
-__version__ = "1.7.3"
+__version__ = "1.7.4"
 APP_NAME = "PlayLimit"
 
 # ---------- CONFIG ----------
@@ -174,6 +174,7 @@ STATE_FILE = DATA_DIR / "state.json"
 LOG_FILE = DATA_DIR / "limiter.log"
 STATUS_FILE = DATA_DIR / "status.json"   # machine-readable heartbeat for the remote monitor
 HISTORY_FILE = DATA_DIR / "history.json" # per-day usage history (per game/app + per user), kept across days
+DASHBOARD_FILE = DATA_DIR / "dashboard.html"  # local copy of monitor/dashboard.html (stable browser storage)
 DISABLE_FLAG_FILE = DATA_DIR / "disabled.flag"
 
 def _current_user() -> str:
@@ -1427,6 +1428,69 @@ def force_update_check():
         _update_status["text"] = "update check failed"
         log(f"Update button error: {e}")
 
+# ---------- MONITOR DASHBOARD (Logs button) ----------
+def _bundled_dashboard_source():
+    """Path to dashboard.html inside the exe bundle (or next to the source)."""
+    candidates = []
+    meipass = getattr(sys, "_MEIPASS", None)  # PyInstaller onefile extraction dir
+    if meipass:
+        candidates.append(Path(meipass) / "monitor" / "dashboard.html")
+        candidates.append(Path(meipass) / "dashboard.html")
+    candidates.append(Path(__file__).resolve().parent / "monitor" / "dashboard.html")
+    for p in candidates:
+        try:
+            if p.exists():
+                return p
+        except Exception:
+            pass
+    return None
+
+def ensure_dashboard_file():
+    """Copy the bundled dashboard to a stable path.
+
+    Opening a file from PyInstaller's changing _MEI temp dir would give the
+    browser a new origin on every launch, losing the saved repo/token. A stable
+    copy in DATA_DIR keeps the dashboard's localStorage setup between runs.
+    """
+    src = _bundled_dashboard_source()
+    if src:
+        try:
+            data = src.read_bytes()
+            if (not DASHBOARD_FILE.exists()) or DASHBOARD_FILE.read_bytes() != data:
+                DASHBOARD_FILE.parent.mkdir(parents=True, exist_ok=True)
+                tmp = DASHBOARD_FILE.with_name(DASHBOARD_FILE.name + ".tmp")
+                tmp.write_bytes(data)
+                tmp.replace(DASHBOARD_FILE)
+                log(f"Dashboard: updated local copy {DASHBOARD_FILE}")
+        except Exception as e:
+            log_warn(f"Dashboard: could not update local copy: {e}")
+    if DASHBOARD_FILE.exists():
+        return DASHBOARD_FILE
+    return src
+
+def open_dashboard():
+    """Open the monitoring dashboard in the default browser (Logs button)."""
+    p = None
+    try:
+        p = ensure_dashboard_file()
+        if not p:
+            log_error("Dashboard: dashboard.html not found (not bundled and no local copy)")
+            return
+        log(f"Dashboard: opening {p}")
+        if hasattr(os, "startfile"):
+            os.startfile(str(p))
+        else:
+            import webbrowser
+            webbrowser.open(p.as_uri())
+    except Exception as e:
+        log_error(f"Dashboard: failed to open: {e}")
+        if p:
+            try:
+                import webbrowser
+                webbrowser.open(p.as_uri())
+            except Exception as e2:
+                log_error(f"Dashboard: browser fallback failed: {e2}")
+
 # ---------- GITHUB LOG SHIPPING ----------
 # Every running copy periodically uploads its log so the parent PC can read all
 # machines' logs from one place: https://github.com/beukes2/playlimit-logs/tree/master/logs
@@ -1874,9 +1938,15 @@ def show_time_window():
                 pass
             threading.Thread(target=force_update_check, daemon=True).start()
 
+        def on_logs_btn():
+            threading.Thread(target=open_dashboard, daemon=True).start()
+
         tk.Button(btn_frame, text="Update", command=on_update_btn,
                   font=("Segoe UI", 8), bg="#2d2d44", fg="#bbbbbb",
-                  relief="flat", padx=8, pady=1).pack()
+                  relief="flat", padx=8, pady=1).pack(side="left", padx=(0, 6))
+        tk.Button(btn_frame, text="Logs", command=on_logs_btn,
+                  font=("Segoe UI", 8), bg="#2d2d44", fg="#bbbbbb",
+                  relief="flat", padx=8, pady=1).pack(side="left")
 
         # Session history grid (newest top, live session ticks from available data).
         # Read-only labels, updated in place every refresh - safe for kids.
