@@ -29,16 +29,18 @@ SUN = datetime.date(2026, 10, 25)
 
 
 class _TempDataDir(unittest.TestCase):
-    """Base class: point all state/status/log files at a fresh temp dir."""
+    """Base class: point all state/status/log/history files at a fresh temp dir."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         d = Path(self._tmp.name)
-        self._saved = {k: getattr(al, k) for k in ("DATA_DIR", "STATE_FILE", "STATUS_FILE", "LOG_FILE")}
+        self._saved = {k: getattr(al, k) for k in
+                       ("DATA_DIR", "STATE_FILE", "STATUS_FILE", "LOG_FILE", "HISTORY_FILE")}
         al.DATA_DIR = d
         al.STATE_FILE = d / "state.json"
         al.STATUS_FILE = d / "status.json"
         al.LOG_FILE = d / "limiter.log"
+        al.HISTORY_FILE = d / "history.json"
         # reset the in-memory issue buffer between tests
         with al._errors_lock:
             al._recent_issues.clear()

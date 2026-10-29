@@ -55,16 +55,24 @@ Why the old machine kept old code: previous versions ran from `C:\Program Files\
 (which standard users cannot overwrite) and only *staged* downloads without ever
 switching. v1.4.0 runs from `%ProgramData%` and hops automatically.
 
-Build + publish a new version (example v1.4.0):
+Build + publish a new version (example v1.7.1):
 ```powershell
-py -m PyInstaller --onefile --noconsole --name PlayLimit --icon playlimit.ico --version-file version_info.txt --distpath dist --workpath build --specpath . --hidden-import pystray --hidden-import PIL --hidden-import psutil albion_limiter.py
+py -m PyInstaller --noconfirm --clean --onefile --noconsole --name PlayLimit --icon playlimit.ico --version-file version_info.txt --distpath dist --workpath build --specpath . --hidden-import pystray --hidden-import PIL --hidden-import psutil --splash splash.png albion_limiter.py
 $sha = (Get-FileHash dist\PlayLimit.exe -Algorithm SHA256).Hash
 "$sha  PlayLimit.exe" | Set-Content dist\PlayLimit.exe.sha256 -NoNewline
+
+# Release gate: version.txt and the exe's embedded version MUST match.
+(Get-Content version.txt -Raw).Trim()
+(Get-Item dist\PlayLimit.exe).VersionInfo.FileVersion
+# both must print the same value before you commit
+
 git add albion_limiter.py version.txt version_info.txt dist/PlayLimit.exe dist/PlayLimit.exe.sha256
-git commit -m "v1.4.0 ..."
+git commit -m "v1.7.1 ..."
 git push
 ```
-`version.txt` must contain the new version (e.g. `1.4.0`) or clients will not pick it up.
+`version.txt` must contain the new version (e.g. `1.7.1`) or clients will not pick it up.
+Never commit a `version.txt` bump without the rebuilt `dist/PlayLimit.exe`: clients
+would download the old binary, see the same old version at startup, and repeat forever.
 
 > **Versioning policy (see `AGENTS.md`):** bump the version on *every* change —
 > `__version__`, `version_info.txt`, and `version.txt` in lockstep. All are now at

@@ -20,7 +20,7 @@ import threading
 import collections
 from pathlib import Path
 
-__version__ = "1.7.0"
+__version__ = "1.7.1"
 APP_NAME = "PlayLimit"
 
 # ---------- CONFIG ----------
@@ -209,6 +209,8 @@ REPO_RAW_BASE = "https://raw.githubusercontent.com/beukes2/playlimit/master"
 LIVE_EXE = DATA_DIR / "PlayLimit.exe"
 STAGED_EXE = DATA_DIR / "PlayLimit.staged.exe"
 STAGED_VER = DATA_DIR / "PlayLimit.staged.ver"
+BAD_VER = DATA_DIR / "PlayLimit.bad.ver"   # remote version known to ship a stale/wrong exe
+BAD_VER_RETRY_SEC = 6 * 3600               # retry a known-bad version after 6h (allows a same-version rebuild)
 UPDATE_TIMEOUT_SEC = 20
 
 # Try to import psutil optionally
@@ -768,6 +770,20 @@ def _check_and_stage_update():
         if not remote_ver:
             return None
         log(f"Updater: local {__version__} vs remote {remote_ver}")
+
+        # A published version whose dist exe was never rebuilt must not be retried
+        # forever (32 MB download + relink loop on every launch). Remember it until
+        # version.txt changes.
+        try:
+            if BAD_VER.exists():
+                bad = BAD_VER.read_text(encoding="utf-8", errors="ignore").strip()
+                age = time.time() - BAD_VER.stat().st_mtime
+                if _parse_ver(bad) == _parse_ver(remote_ver) and age < BAD_VER_RETRY_SEC:
+                    log(f"Updater: remote v{remote_ver} is known-bad (version.txt/exe out of sync), retry in {int((BAD_VER_RETRY_SEC - age) / 60)} min")
+                    return None
+                BAD_VER.unlink(missing_ok=True)
+        except Exception:
+            pass
         if _parse_ver(remote_ver) <= _parse_ver(__version__):
             log("Updater: already latest")
             # Drop any stale staged files for versions we already passed
@@ -809,6 +825,23 @@ def _check_and_stage_update():
 
         STAGED_EXE.parent.mkdir(parents=True, exist_ok=True)
         STAGED_EXE.write_bytes(exe_data)
+
+        # The exe's own FileVersion must match version.txt. If not, the release
+        # was published with a stale dist/PlayLimit.exe: hopping would just run
+        # the old code again and repeat the download on every launch.
+        embedded = _exe_file_version(STAGED_EXE)
+        if embedded is not None and _parse_ver(embedded) != _parse_ver(remote_ver):
+            STAGED_EXE.unlink(missing_ok=True)
+            STAGED_VER.unlink(missing_ok=True)
+            log_error(f"Updater: remote v{remote_ver} exe reports v{embedded} - version.txt and dist/PlayLimit.exe are out of sync, abort")
+            try:
+                BAD_VER.write_text(remote_ver, encoding="utf-8")
+            except Exception:
+                pass
+            return None
+        if embedded is None:
+            log_warn("Updater: could not read downloaded exe FileVersion; relying on SHA256 only")
+
         STAGED_VER.write_text(remote_ver, encoding="utf-8")
         log(f"Updater: v{remote_ver} downloaded+verified, staged ({len(exe_data)} bytes)")
         return remote_ver
@@ -854,11 +887,35 @@ def _spawn_hop_helper_only(staged_ver: str):
         "param([int]$OldPid, [string]$Live, [string]$Staged, [string]$Sver, [string]$HopLog)\n"
         "\"hop-start old=$OldPid at $(Get-Date -Format 'HH:mm:ss')\" | Out-File $HopLog -Append\n"
         "while (Get-Process -Id $OldPid -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 200 }\n"
-        "\"old-gone, moving staged->live\" | Out-File $HopLog -Append\n"
-        "try {\n"
-        "  Move-Item -LiteralPath $Staged -Destination $Live -Force -ErrorAction Stop\n"
-        "  \"moved ok\" | Out-File $HopLog -Append\n"
-        "} catch { \"MOVE-FAILED: $($_.Exception.Message)\" | Out-File $HopLog -Append; exit 1 }\n"
+        "\"old-gone, replacing live with staged\" | Out-File $HopLog -Append\n"
+        "# Move-Item -Force intermittently fails with ERROR_ALREADY_EXISTS when the\n"
+        "# destination exe still exists (seen repeatedly in hop.log). File.Replace is\n"
+        "# an atomic swap and leaves the old exe untouched if it fails. Retry briefly\n"
+        "# because Windows/AV may hold the image for a moment after the process exits.\n"
+        "$ok = $false\n"
+        "$backup = $Live + '.old'\n"
+        "for ($i = 1; $i -le 40; $i++) {\n"
+        "  try {\n"
+        "    Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue\n"
+        "    if (Test-Path -LiteralPath $Live) {\n"
+        "      [System.IO.File]::Replace($Staged, $Live, $backup)\n"
+        "      Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue\n"
+        "    } else {\n"
+        "      [System.IO.File]::Move($Staged, $Live)\n"
+        "    }\n"
+        "    $ok = $true\n"
+        "    break\n"
+        "  } catch {\n"
+        "    if ($i -eq 1) { \"replace failed (attempt $i): $($_.Exception.Message), retrying\" | Out-File $HopLog -Append }\n"
+        "    Start-Sleep -Milliseconds 250\n"
+        "  }\n"
+        "}\n"
+        "if (-not $ok) {\n"
+        "  \"REPLACE-FAILED after 40 tries - old exe kept, relaunching it\" | Out-File $HopLog -Append\n"
+        "  Start-Process -FilePath $Live\n"
+        "  exit 1\n"
+        "}\n"
+        "\"replaced ok\" | Out-File $HopLog -Append\n"
         "Remove-Item -LiteralPath $Sver -Force -ErrorAction SilentlyContinue\n"
         "\"marker deleted, relaunching\" | Out-File $HopLog -Append\n"
         "Start-Process -FilePath $Live\n"
@@ -887,6 +944,12 @@ def _pending_staged_version():
         if not sv or _parse_ver(sv) <= _parse_ver(__version__):
             return None
         if STAGED_EXE.stat().st_size < 1024 * 100:
+            return None
+        embedded = _exe_file_version(STAGED_EXE)
+        if embedded is not None and _parse_ver(embedded) != _parse_ver(sv):
+            log_error(f"Updater: staged v{sv} exe reports v{embedded} - discarding stale staged update")
+            STAGED_EXE.unlink(missing_ok=True)
+            STAGED_VER.unlink(missing_ok=True)
             return None
         return sv
     except Exception:
