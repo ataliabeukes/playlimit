@@ -31,6 +31,7 @@ Limits Albion Online playtime for kids:
 | `install.ps1` | Installer (run as Administrator) |
 | `install.bat` | Batch wrapper for installer |
 | `uninstall.ps1` | Uninstaller (run as Administrator) |
+| `repair.bat` / `repair.ps1` | One-click repair/forced update for a machine stuck on an old version |
 | `monitor/dashboard.html` | Remote monitoring dashboard - bundled into the exe and opened by the **Logs** button |
 | `test_matcher.py` | Game-detection matcher tests |
 | `test_basic.py` | Unit tests: limits, state, sessions, status, logging |
@@ -83,6 +84,28 @@ would download the old binary, see the same old version at startup, and repeat f
 > releasing/merging a `version.txt` bump you must rebuild**
 > `dist/PlayLimit.exe` + `dist/PlayLimit.exe.sha256` on Windows and commit them in
 > the same change — otherwise clients "update" to the stale exe still in `dist/`.
+
+### Stuck on an old version? (`Failed to load Python DLL` / security validation)
+
+Versions before 1.7.3 use an update helper that leaks PyInstaller's private
+`_PYI_*` variables into the replacement exe. On some machines that makes the
+new exe unable to find its `python312.dll`, so the update never finishes.
+1.7.3+ clears those variables, but an old client cannot be fixed remotely.
+
+Fix a stuck machine once with **`repair.bat`** (double-click it, accept the UAC
+prompt). It force-downloads the latest verified exe, stops the old process,
+replaces `%ProgramData%\AlbionLimiter\PlayLimit.exe`, clears stale `_MEI*`
+directories, and starts it with `_PYI_*` removed. Progress goes to
+`%ProgramData%\AlbionLimiter\repair.log`; if it still fails, run `diag.bat`.
+
+Or run the equivalent one-liner in PowerShell:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "iwr 'https://raw.githubusercontent.com/beukes2/playlimit/master/repair.ps1' -UseBasicParsing -OutFile $env:TEMP\repair.ps1; Start-Process powershell -Verb RunAs -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-NoExit','-File',$env:TEMP\repair.ps1"
+```
+
+After one repair, the machine is on 1.7.4+ and the normal **Update** button
+works for all future releases.
 
 ## Installation (none needed — just open the exe)
 
