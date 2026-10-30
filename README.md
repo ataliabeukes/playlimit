@@ -27,7 +27,9 @@ Limits Albion Online playtime for kids:
 | File | Description |
 |------|-------------|
 | `albion_limiter.py` | Main service — polling + hotkey + auto-update + log/status shipping |
-| `dist/PlayLimit.exe` | Latest compiled executable (auto-updated on launch) |
+| `dist/PlayLimit.exe` | Native launcher wrapping the real app (auto-updated on launch) |
+| `build.ps1` | Builds the real app + native launcher + SHA in one step |
+| `bootstrap/` | C# source for the native launcher/apply helper |
 | `install.ps1` | Installer (run as Administrator) |
 | `install.bat` | Batch wrapper for installer |
 | `uninstall.ps1` | Uninstaller (run as Administrator) |
@@ -56,56 +58,34 @@ Why the old machine kept old code: previous versions ran from `C:\Program Files\
 (which standard users cannot overwrite) and only *staged* downloads without ever
 switching. v1.4.0 runs from `%ProgramData%` and hops automatically.
 
-Build + publish a new version (example v1.7.4):
+Build + publish a new version (example v1.7.5):
 ```powershell
-# Pin PyInstaller 6.22.0 for now: 6.22.1/6.22.2 added onefile parent-process
-# validation that aborts when the update hop inherits _PYI_* variables.
-py -m pip install "pyinstaller==6.22.0"
-py -m PyInstaller --noconfirm --clean --onefile --noconsole --name PlayLimit --icon playlimit.ico --version-file version_info.txt --distpath dist --workpath build --specpath . --hidden-import pystray --hidden-import PIL --hidden-import psutil --splash splash.png --add-data "monitor/dashboard.html;monitor" albion_limiter.py
-$sha = (Get-FileHash dist\PlayLimit.exe -Algorithm SHA256).Hash
-"$sha  PlayLimit.exe" | Set-Content dist\PlayLimit.exe.sha256 -NoNewline
-
-# Release gate: version.txt and the exe's embedded version MUST match.
-(Get-Content version.txt -Raw).Trim()
-(Get-Item dist\PlayLimit.exe).VersionInfo.FileVersion
-# both must print the same value before you commit
-
+.\build.ps1
 git add albion_limiter.py version.txt version_info.txt dist/PlayLimit.exe dist/PlayLimit.exe.sha256
-git commit -m "v1.7.4 ..."
+git commit -m "v1.7.5 ..."
 git push
 ```
-`version.txt` must contain the new version (e.g. `1.7.4`) or clients will not pick it up.
-`--add-data` bundles `monitor/dashboard.html` into the exe for the **Logs** button.
-Never commit a `version.txt` bump without the rebuilt `dist/PlayLimit.exe`: clients
-would download the old binary, see the same old version at startup, and repeat forever.
+`build.ps1` builds the real PyInstaller app, wraps it in the native
+`dist\PlayLimit.exe` **launcher**, regenerates the SHA, and verifies both versions.
+
+**Why a launcher?** The old updater launches the downloaded exe with PyInstaller's
+private `_PYI_*` variables in its environment, which can make a normal PyInstaller
+exe fail with `Failed to load Python DLL`. The launcher is native: it ignores those
+variables, installs the real app over itself, and starts the real app with a clean
+environment. Old and new clients can both update normally.
+
+`version.txt` must contain the new version (e.g. `1.7.5`) or clients will not pick
+it up. Never commit a `version.txt` bump without rebuilding `dist/PlayLimit.exe`.
 
 > **Versioning policy (see `AGENTS.md`):** bump the version on *every* change —
-> `__version__`, `version_info.txt`, and `version.txt` in lockstep. **Before
-> releasing/merging a `version.txt` bump you must rebuild**
-> `dist/PlayLimit.exe` + `dist/PlayLimit.exe.sha256` on Windows and commit them in
-> the same change — otherwise clients "update" to the stale exe still in `dist/`.
+> `__version__`, `version_info.txt`, and `version.txt` in lockstep, then run
+> `build.ps1` and commit the rebuilt launcher + SHA in the same change.
 
-### Stuck on an old version? (`Failed to load Python DLL` / security validation)
+### If a machine was already left with a broken exe
 
-Versions before 1.7.3 use an update helper that leaks PyInstaller's private
-`_PYI_*` variables into the replacement exe. On some machines that makes the
-new exe unable to find its `python312.dll`, so the update never finishes.
-1.7.3+ clears those variables, but an old client cannot be fixed remotely.
-
-Fix a stuck machine once with **`repair.bat`** (double-click it, accept the UAC
-prompt). It force-downloads the latest verified exe, stops the old process,
-replaces `%ProgramData%\AlbionLimiter\PlayLimit.exe`, clears stale `_MEI*`
-directories, and starts it with `_PYI_*` removed. Progress goes to
-`%ProgramData%\AlbionLimiter\repair.log`; if it still fails, run `diag.bat`.
-
-Or run the equivalent one-liner in PowerShell:
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "iwr 'https://raw.githubusercontent.com/beukes2/playlimit/master/repair.ps1' -UseBasicParsing -OutFile $env:TEMP\repair.ps1; Start-Process powershell -Verb RunAs -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-NoExit','-File',$env:TEMP\repair.ps1"
-```
-
-After one repair, the machine is on 1.7.4+ and the normal **Update** button
-works for all future releases.
+`repair.bat` remains as a last-resort one-click fix for a machine whose live exe
+will not start at all. 1.7.5+ does **not** need it: the launcher handles the old
+updater's environment automatically.
 
 ## Installation (none needed — just open the exe)
 
