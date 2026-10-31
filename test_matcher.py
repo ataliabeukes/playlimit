@@ -15,7 +15,7 @@ cases = [
     ("RobloxPlayerBeta.exe", [], [], True, "roblox"),
     ("FortniteClient-Win64-Shipping.exe", [], [], True, "fortnite"),
     ("GameOverlayUI.exe", [], ["steam.exe"], True, "steam overlay only exists during gameplay"),
-    ("steam.exe", [], [], False, "steam client itself"),
+    ("steam.exe", [], [], True, "steam client itself now counts (in-app videos/store/library)"),
     ("QtWebEngineProcess.exe", [], ["steam.exe"], False, "steam store renderer is not gameplay"),
     ("crashpad_handler.exe", [], ["steam.exe"], False, "crash helper is not gameplay"),
     ("UnityCrashHandler64.exe", [], ["Albion-Online.exe"], False, "crash helper under game is not gameplay"),

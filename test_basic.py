@@ -212,8 +212,16 @@ class TestMatcher(_TempDataDir):
     def test_steam_launched_counts(self):
         self.assertTrue(al._is_game_process("SomeGame.exe", [], ["steam.exe"]))
 
-    def test_steam_helper_does_not_count(self):
+    def test_steam_client_counts(self):
+        # Steam being open (in-app videos, store, library) burns the budget.
+        self.assertTrue(al._is_game_process("steam.exe", [], []))
+        self.assertIn("steam.exe", al._tasklist_game_hits('"steam.exe","1","Console","1","100 K"'))
+
+    def test_steam_helper_alone_does_not_count(self):
+        # A lingering helper WITHOUT the client is not active use. (When steam.exe
+        # is open it already counts, so the helper never needs to on its own.)
         self.assertFalse(al._is_game_process("steamwebhelper.exe", [], ["steam.exe"]))
+        self.assertFalse(al._is_game_process("steamservice.exe", [], []))
 
     def test_tasklist_hits(self):
         hits = al._tasklist_game_hits('"Albion-Online.exe","1","Console","1","100 K"\n"notepad.exe","2","Console","1","1 K"')

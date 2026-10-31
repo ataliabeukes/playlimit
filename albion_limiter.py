@@ -20,7 +20,7 @@ import threading
 import collections
 from pathlib import Path
 
-__version__ = "1.7.6"
+__version__ = "1.7.7"
 APP_NAME = "PlayLimit"
 
 # ---------- CONFIG ----------
@@ -68,8 +68,13 @@ TARGET_PROCESSES = GAME_PROCESSES
 # Java hosts only count when they are actually Minecraft (never any random java app)
 JAVA_MINECRAFT_NAMES = ["javaw.exe", "java.exe", "javawm.exe"]
 
-# Steam components that must NEVER count as playtime (store/chat/service idle)
-STEAM_NON_GAME = ["steam.exe", "steamwebhelper.exe", "steamservice.exe",
+# The Steam CLIENT itself counts as playtime: having Steam open (in-app videos,
+# store, library, friends) burns the shared budget, not just games launched from it.
+STEAM_CLIENT_NAMES = ["steam.exe"]
+# Steam background components that must NOT count on their OWN (service/helpers that
+# can linger without the client). When the client (steam.exe) is open it already
+# counts, so these never need to; alone they are not active use.
+STEAM_NON_GAME = ["steamwebhelper.exe", "steamservice.exe",
                   "steamerrorreporter.exe", "steamuserstatisticssync.exe"]
 STEAM_HOST_NAMES = ["steam.exe"]
 # Helper processes that are never the game itself, even when Steam launched them
@@ -2376,6 +2381,7 @@ def show_warning_async(title, text, style=0x30):
 
 GAME_PROCESSES_SET = set(n.lower() for n in GAME_PROCESSES)
 JAVA_MINECRAFT_SET = set(n.lower() for n in JAVA_MINECRAFT_NAMES)
+STEAM_CLIENT_SET = set(n.lower() for n in STEAM_CLIENT_NAMES)
 STEAM_NON_GAME_SET = set(n.lower() for n in STEAM_NON_GAME)
 STEAM_HOST_SET = set(n.lower() for n in STEAM_HOST_NAMES)
 STEAM_ANCESTRY_EXCLUDE_SET = set(n.lower() for n in STEAM_ANCESTRY_EXCLUDE)
@@ -2386,6 +2392,10 @@ def _is_game_process(name: str, cmdline, ancestor_names) -> bool:
     if not n:
         return False
     if n in GAME_PROCESSES_SET:
+        return True
+    # The Steam client itself counts: Steam being open (in-app videos, store,
+    # library, friends) burns the shared budget, not only games it launches.
+    if n in STEAM_CLIENT_SET:
         return True
     # catch-all for Albion variants (e.g. future launcher names)
     if "albion" in n and n.endswith(".exe"):
@@ -2453,6 +2463,11 @@ def _tasklist_game_hits(text: str):
         for n in GAME_PROCESSES_SET:
             if n and n in low:
                 hits.add(n)
+        # Steam client (covers an elevated Steam psutil can't inspect). "steam.exe"
+        # as a substring does not match steamwebhelper.exe/steamservice.exe.
+        for n in STEAM_CLIENT_SET:
+            if n and n in low:
+                hits.add(n)
         for sub in TASKLIST_GAME_SUBSTRINGS:
             if sub in low:
                 hits.add(sub)
@@ -2478,7 +2493,7 @@ def get_running_games():
                     info = p.info or {}
                     name = info.get('name') or ""
                     nl = name.lower()
-                    if nl in GAME_PROCESSES_SET or ("albion" in nl and nl.endswith(".exe")):
+                    if nl in GAME_PROCESSES_SET or nl in STEAM_CLIENT_SET or ("albion" in nl and nl.endswith(".exe")):
                         found[nl] = name
                         continue
                     if nl in STEAM_NON_GAME_SET or not nl:

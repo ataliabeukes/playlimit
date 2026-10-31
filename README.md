@@ -2,7 +2,7 @@
 
 Limits Albion Online playtime for kids:
 - **Mon–Thu: 1 hour/day TOTAL across all games, Fri–Sun: 120 minutes/day**
-- Watched: Albion Online, Minecraft (Java + Bedrock + launcher), Roblox, Fortnite, Riot games, **any game launched through Steam** (detected via parent process) — Java only counts when it's actually Minecraft, Steam client/service/helpers never count
+- Watched: Albion Online, Minecraft (Java + Bedrock + launcher), Roblox, Fortnite, Riot games, **the Steam client itself** (open Steam — in-app videos, store, library — counts, v1.7.7+) plus **any game launched through Steam** (detected via parent process) — Java only counts when it's actually Minecraft; Steam background service/helpers don't count on their own
 - 5 minute warning popup before time runs out
 - Automatically closes game when time is up
 - Blocks reopening until next day (midnight)
