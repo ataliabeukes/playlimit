@@ -20,7 +20,7 @@ import threading
 import collections
 from pathlib import Path
 
-__version__ = "1.7.3"
+__version__ = "1.7.6"
 APP_NAME = "PlayLimit"
 
 # ---------- CONFIG ----------
@@ -151,7 +151,7 @@ def is_browser_block_exempt() -> bool:
     return False
 
 # App control
-APP_DISABLED = False  # set True by Ctrl+Shift+D hotkey
+APP_DISABLED = False  # set by Ctrl+Alt+D / Ctrl+Shift+D hotkeys
 DISABLE_FLAG_FILE = None  # set after DATA_DIR known
 
 # State / log locations
@@ -174,6 +174,7 @@ STATE_FILE = DATA_DIR / "state.json"
 LOG_FILE = DATA_DIR / "limiter.log"
 STATUS_FILE = DATA_DIR / "status.json"   # machine-readable heartbeat for the remote monitor
 HISTORY_FILE = DATA_DIR / "history.json" # per-day usage history (per game/app + per user), kept across days
+DASHBOARD_FILE = DATA_DIR / "dashboard.html"  # local copy of monitor/dashboard.html (stable browser storage)
 DISABLE_FLAG_FILE = DATA_DIR / "disabled.flag"
 
 def _current_user() -> str:
@@ -205,18 +206,24 @@ _APP_START_EPOCH = time.time()
 # verify -> stage -> one clean hop (helper swaps files after we exit, relaunches).
 # Strict version increase + verified hash = converges, no respawn storm possible.
 AUTO_UPDATE_ENABLED = True
+# Update source + logs repo live on ataliabeukes (self-owned). The old beukes2 repo
+# is upstream/reference-only; this machine cannot push there, so clients must pull
+# updates from ataliabeukes. Keep this in lockstep with repair.ps1 / set-token.ps1.
 REPO_RAW_BASE = "https://raw.githubusercontent.com/ataliabeukes/playlimit/master"
 LIVE_EXE = DATA_DIR / "PlayLimit.exe"
 STAGED_EXE = DATA_DIR / "PlayLimit.staged.exe"
 STAGED_VER = DATA_DIR / "PlayLimit.staged.ver"
+BAD_VER = DATA_DIR / "PlayLimit.bad.ver"   # remote version known to ship a stale/wrong exe
+BAD_VER_RETRY_SEC = 6 * 3600               # retry a known-bad version after 6h (allows a same-version rebuild)
 UPDATE_TIMEOUT_SEC = 20
 
-# --- Safe-update guard rails (canary + quarantine) ---
-# Before committing an update hop we launch the staged exe once in --selfcheck
-# mode and require it to (a) exit 0 and (b) write a fresh selfcheck heartbeat whose
-# version matches the version we think we are updating to. This catches a staged
-# exe that will not launch (e.g. bootloader abort) AND a mislabeled/stale exe whose
-# real __version__ does not match version.txt (which would otherwise loop forever).
+# --- Safe-update guard rails (selfcheck canary + quarantine) ---
+# Layered ON TOP of the native launcher + BAD_VER memory: before committing an
+# update hop we launch the staged exe once in --selfcheck mode and require it to
+# (a) exit 0 and (b) write a fresh selfcheck heartbeat whose version matches the
+# version we think we are updating to. This catches a staged exe that will not
+# launch (e.g. bootloader abort / missing DLL) AND a mislabeled/stale exe whose
+# real __version__ != version.txt (which would otherwise loop forever).
 SELFCHECK_FILE = DATA_DIR / "selfcheck.json"
 UPDATE_GUARD_FILE = DATA_DIR / "update_guard.json"
 CANARY_TIMEOUT_SEC = 30          # max seconds to let a staged exe prove it launches
@@ -298,10 +305,6 @@ def _install_excepthooks():
             log_error("UNCAUGHT exception (main thread)", exc=exc)
         except Exception:
             pass
-        try:
-            _flush_telemetry("crash")  # ship before we die, don't wait for the timer
-        except Exception:
-            pass
     sys.excepthook = _main_hook
     try:
         def _thread_hook(args):
@@ -310,10 +313,6 @@ def _install_excepthooks():
             try:
                 tname = getattr(args.thread, "name", "?")
                 log_error(f"UNCAUGHT exception in thread '{tname}'", exc=args.exc_value)
-            except Exception:
-                pass
-            try:
-                _flush_telemetry("crash")
             except Exception:
                 pass
         threading.excepthook = _thread_hook
@@ -360,39 +359,42 @@ def is_disabled() -> bool:
     # No persistent flag - disabled is in-memory only for this session, always starts enabled
     return APP_DISABLED
 
-def disable_app():
-    """Ctrl+Shift+D: disable for the rest of today and exit (auto re-enables tomorrow).
+def set_disabled_for_today(disabled: bool):
+    """Persist/clear today's disabled_date and update the in-memory flag.
 
-    The scheduled task is deliberately NOT disabled: that would stop the app from
-    ever starting again to clear the flag at midnight. The task stays enabled so
-    the app comes back at next logon and re-enables itself on the new date.
+    Single source of truth for both disable hotkeys:
+      * disabled=True  -> enforcement off until midnight
+      * disabled=False -> enforcement back on immediately
+    The scheduled task is never disabled, so the app can always start again and
+    clear the date after midnight. Ctrl+Alt+D toggles this value.
     """
     global APP_DISABLED
-    APP_DISABLED = True
-    log("=== PlayLimit DISABLED for today by Ctrl+Shift+D - exiting (auto re-enables tomorrow) ===")
+    APP_DISABLED = bool(disabled)
     try:
         with _state_lock:
             st = load_state()
-            st["disabled_date"] = datetime.date.today().isoformat()
+            st["disabled_date"] = datetime.date.today().isoformat() if disabled else None
             save_state(st)
-        log("Saved disabled_date = today (clears automatically on the next day)")
     except Exception as e:
         log(f"Could not save disabled_date: {e}")
+    if disabled:
+        log("=== PlayLimit DISABLED for today (Ctrl+Alt+D re-enables now; auto re-enables tomorrow) ===")
+    else:
+        log("=== PlayLimit RE-ENABLED for today (all limits active again) ===")
+
+def disable_app():
+    """Ctrl+Shift+D while enabled: disable for the rest of today and exit."""
+    set_disabled_for_today(True)
     request_shutdown("disabled via Ctrl+Shift+D")
 
 def enable_app():
-    global APP_DISABLED
-    APP_DISABLED = False
+    """Re-enable immediately (Ctrl+Alt+D, or Ctrl+Shift+D while already disabled)."""
+    set_disabled_for_today(False)
     try:
         if DISABLE_FLAG_FILE.exists():
             DISABLE_FLAG_FILE.unlink()
     except Exception:
         pass
-    try:
-        subprocess.run(["schtasks", "/Change", "/TN", "AlbionLimiter", "/ENABLE"], capture_output=True, timeout=10, creationflags=subprocess.CREATE_NO_WINDOW)
-    except Exception:
-        pass
-    log("PlayLimit re-enabled")
 
 def protect_process():
     """No-op now: app must be closable. Window visible = running, closed = fully gone."""
@@ -711,6 +713,19 @@ def _parse_ver(v: str):
     except Exception:
         return (0,)
 
+def _clean_pyi_env():
+    """Environment for launching another copy of this frozen onefile exe.
+
+    PyInstaller's onefile bootloader passes private _PYI_* variables to child
+    processes. If a replacement exe inherits them, PyInstaller >= 6.22.1 treats
+    it as a child of the old (already exited) process and aborts with
+    "Security validation failure: ... parent process ...". Strip them and set
+    the documented reset flag so the new exe starts as a fresh top-level app.
+    """
+    env = {k: v for k, v in os.environ.items() if not k.startswith("_PYI_")}
+    env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    return env
+
 def _download_bytes(url: str, timeout: int):
     """Download raw bytes or return None. No popups, log only."""
     try:
@@ -789,6 +804,33 @@ def _check_and_stage_update():
         if not remote_ver:
             return None
         log(f"Updater: local {__version__} vs remote {remote_ver}")
+
+        # A published version whose dist exe was never rebuilt must not be retried
+        # forever (32 MB download + relink loop on every launch). Remember it until
+        # version.txt changes.
+        try:
+            if BAD_VER.exists():
+                bad = BAD_VER.read_text(encoding="utf-8", errors="ignore").strip()
+                age = time.time() - BAD_VER.stat().st_mtime
+                if _parse_ver(bad) == _parse_ver(remote_ver) and age < BAD_VER_RETRY_SEC:
+                    log(f"Updater: remote v{remote_ver} is known-bad (version.txt/exe out of sync), retry in {int((BAD_VER_RETRY_SEC - age) / 60)} min")
+                    return None
+                BAD_VER.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+        # Canary quarantine: once a target version has failed the --selfcheck canary
+        # MAX_UPDATE_FAILS times, stop re-downloading/hopping it until version.txt moves on.
+        blocked, qreason = _guard_blocks(remote_ver)
+        if blocked:
+            log_warn(f"Updater: v{remote_ver} is quarantined ({qreason}) - refusing to re-download/hop; staying on v{__version__}")
+            return None
+        # A quarantine for an older target is stale once the remote advances; clear it
+        # so the dashboard stops showing a refusal that no longer applies.
+        _g = _load_update_guard()
+        if _g and _g.get("ver") and _g.get("ver") != remote_ver:
+            _clear_quarantine(_g.get("ver"))
+
         if _parse_ver(remote_ver) <= _parse_ver(__version__):
             log("Updater: already latest")
             # Drop any stale staged files for versions we already passed
@@ -801,13 +843,6 @@ def _check_and_stage_update():
                         log("Updater: removed stale staged update")
             except Exception:
                 pass
-            return None
-
-        # Quarantined? A previous canary proved this target is broken/mislabeled.
-        # Skip re-downloading it until version.txt advances to something else.
-        blocked, qreason = _guard_blocks(remote_ver)
-        if blocked:
-            log_warn(f"Updater: v{remote_ver} is quarantined ({qreason}) - refusing to re-download/hop; staying on v{__version__}")
             return None
 
         log(f"Updater: new version {remote_ver} available, downloading...")
@@ -837,6 +872,23 @@ def _check_and_stage_update():
 
         STAGED_EXE.parent.mkdir(parents=True, exist_ok=True)
         STAGED_EXE.write_bytes(exe_data)
+
+        # The exe's own FileVersion must match version.txt. If not, the release
+        # was published with a stale dist/PlayLimit.exe: hopping would just run
+        # the old code again and repeat the download on every launch.
+        embedded = _exe_file_version(STAGED_EXE)
+        if embedded is not None and _parse_ver(embedded) != _parse_ver(remote_ver):
+            STAGED_EXE.unlink(missing_ok=True)
+            STAGED_VER.unlink(missing_ok=True)
+            log_error(f"Updater: remote v{remote_ver} exe reports v{embedded} - version.txt and dist/PlayLimit.exe are out of sync, abort")
+            try:
+                BAD_VER.write_text(remote_ver, encoding="utf-8")
+            except Exception:
+                pass
+            return None
+        if embedded is None:
+            log_warn("Updater: could not read downloaded exe FileVersion; relying on SHA256 only")
+
         STAGED_VER.write_text(remote_ver, encoding="utf-8")
         log(f"Updater: v{remote_ver} downloaded+verified, staged ({len(exe_data)} bytes)")
         return remote_ver
@@ -854,8 +906,8 @@ def _do_update_hop(staged_ver: str):
     No popups - progress goes to limiter.log and the new window title.
     """
     try:
-        # Canary gate: never delete the working exe for a staged one that cannot
-        # prove it launches and is the version it claims. Prevents brick/loop.
+        # Canary gate: never hop to a staged exe that cannot prove it launches and
+        # reports the expected version. On failure it quarantines + clears staged.
         if not _canary_gate(staged_ver):
             return
         _spawn_hop_helper_only(staged_ver)
@@ -884,13 +936,41 @@ def _spawn_hop_helper_only(staged_ver: str):
     hoplog = str(HOP_LOG)
     script = (
         "param([int]$OldPid, [string]$Live, [string]$Staged, [string]$Sver, [string]$HopLog)\n"
+        "# Never pass PyInstaller's private onefile vars to the replacement exe:\n"
+        "# PyInstaller >=6.22.1 aborts with a parent-process security validation.\n"
+        "Get-ChildItem Env: | Where-Object { $_.Name -like '_PYI_*' } | Remove-Item -ErrorAction SilentlyContinue\n"
+        "$env:PYINSTALLER_RESET_ENVIRONMENT = '1'\n"
         "\"hop-start old=$OldPid at $(Get-Date -Format 'HH:mm:ss')\" | Out-File $HopLog -Append\n"
         "while (Get-Process -Id $OldPid -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 200 }\n"
-        "\"old-gone, moving staged->live\" | Out-File $HopLog -Append\n"
-        "try {\n"
-        "  Move-Item -LiteralPath $Staged -Destination $Live -Force -ErrorAction Stop\n"
-        "  \"moved ok\" | Out-File $HopLog -Append\n"
-        "} catch { \"MOVE-FAILED: $($_.Exception.Message)\" | Out-File $HopLog -Append; exit 1 }\n"
+        "\"old-gone, replacing live with staged\" | Out-File $HopLog -Append\n"
+        "# Move-Item -Force intermittently fails with ERROR_ALREADY_EXISTS when the\n"
+        "# destination exe still exists (seen repeatedly in hop.log). File.Replace is\n"
+        "# an atomic swap and leaves the old exe untouched if it fails. Retry briefly\n"
+        "# because Windows/AV may hold the image for a moment after the process exits.\n"
+        "$ok = $false\n"
+        "$backup = $Live + '.old'\n"
+        "for ($i = 1; $i -le 40; $i++) {\n"
+        "  try {\n"
+        "    Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue\n"
+        "    if (Test-Path -LiteralPath $Live) {\n"
+        "      [System.IO.File]::Replace($Staged, $Live, $backup)\n"
+        "      Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue\n"
+        "    } else {\n"
+        "      [System.IO.File]::Move($Staged, $Live)\n"
+        "    }\n"
+        "    $ok = $true\n"
+        "    break\n"
+        "  } catch {\n"
+        "    if ($i -eq 1) { \"replace failed (attempt $i): $($_.Exception.Message), retrying\" | Out-File $HopLog -Append }\n"
+        "    Start-Sleep -Milliseconds 250\n"
+        "  }\n"
+        "}\n"
+        "if (-not $ok) {\n"
+        "  \"REPLACE-FAILED after 40 tries - old exe kept, relaunching it\" | Out-File $HopLog -Append\n"
+        "  Start-Process -FilePath $Live\n"
+        "  exit 1\n"
+        "}\n"
+        "\"replaced ok\" | Out-File $HopLog -Append\n"
         "Remove-Item -LiteralPath $Sver -Force -ErrorAction SilentlyContinue\n"
         "\"marker deleted, relaunching\" | Out-File $HopLog -Append\n"
         "Start-Process -FilePath $Live\n"
@@ -907,6 +987,7 @@ def _spawn_hop_helper_only(staged_ver: str):
          "-WindowStyle", "Hidden", "-File", str(HOP_HELPER_PS1),
          str(me), live, staged, sver, hoplog],
         creationflags=NEW_GROUP,
+        env=_clean_pyi_env(),
     )
     log(f"Updater: hop helper started for v{staged_ver} (see hop.log)")
 
@@ -919,6 +1000,12 @@ def _pending_staged_version():
         if not sv or _parse_ver(sv) <= _parse_ver(__version__):
             return None
         if STAGED_EXE.stat().st_size < 1024 * 100:
+            return None
+        embedded = _exe_file_version(STAGED_EXE)
+        if embedded is not None and _parse_ver(embedded) != _parse_ver(sv):
+            log_error(f"Updater: staged v{sv} exe reports v{embedded} - discarding stale staged update")
+            STAGED_EXE.unlink(missing_ok=True)
+            STAGED_VER.unlink(missing_ok=True)
             return None
         return sv
     except Exception:
@@ -1028,6 +1115,7 @@ def _canary_ok(staged_path: Path, expected_ver: str):
             timeout=CANARY_TIMEOUT_SEC,
             capture_output=True,
             creationflags=CREATE_NO_WINDOW,
+            env=_clean_pyi_env(),
         )
     except subprocess.TimeoutExpired:
         return False, f"selfcheck timed out after {CANARY_TIMEOUT_SEC}s (exe did not launch cleanly)"
@@ -1063,8 +1151,9 @@ def _validate_selfcheck(expected_ver: str, now: int = None):
 def _canary_gate(staged_ver: str) -> bool:
     """Gate every hop: only allow it if the staged exe passes the canary.
 
-    On failure: quarantine the version, delete the bad staged files, log+ship the
-    error, and return False so the caller keeps running the current (working) version.
+    On failure: quarantine the version, delete the bad staged files, log the error,
+    and return False so the caller keeps running the current (working) version. The
+    quarantine is surfaced to the dashboard via build_status()["update_guard"].
     """
     try:
         if not STAGED_EXE.exists():
@@ -1080,10 +1169,6 @@ def _canary_gate(staged_ver: str) -> bool:
         try:
             STAGED_EXE.unlink(missing_ok=True)
             STAGED_VER.unlink(missing_ok=True)
-        except Exception:
-            pass
-        try:
-            _flush_telemetry("canary-fail")
         except Exception:
             pass
         return False
@@ -1440,14 +1525,15 @@ def ensure_installed():
                         return
                 elif mv_live and mv_me and _parse_ver(mv_live) > _parse_ver(mv_me):
                     log(f"Install: canonical v{mv_live} is newer - hopping to it")
-                    subprocess.Popen([str(LIVE_EXE)],
-                                     creationflags=0x00000200, close_fds=True)
+                    subprocess.Popen([str(LIVE_EXE)], creationflags=0x00000200,
+                                     close_fds=True, env=_clean_pyi_env())
                     sys.exit(0)
                 # else same version: fall through and run (portable copy, still enforces)
             if LIVE_EXE.exists() and me != LIVE_EXE.resolve():
                 # Relaunch from canonical so task/shortcuts/updates all agree on one file
                 try:
-                    subprocess.Popen([str(LIVE_EXE)], creationflags=0x00000200, close_fds=True)
+                    subprocess.Popen([str(LIVE_EXE)], creationflags=0x00000200,
+                                     close_fds=True, env=_clean_pyi_env())
                     log("Install: relaunched from canonical location")
                 except Exception as e:
                     log(f"Install: relaunch failed ({e}) - running portable this session")
@@ -1540,6 +1626,69 @@ def force_update_check():
     except Exception as e:
         _update_status["text"] = "update check failed"
         log(f"Update button error: {e}")
+
+# ---------- MONITOR DASHBOARD (Logs button) ----------
+def _bundled_dashboard_source():
+    """Path to dashboard.html inside the exe bundle (or next to the source)."""
+    candidates = []
+    meipass = getattr(sys, "_MEIPASS", None)  # PyInstaller onefile extraction dir
+    if meipass:
+        candidates.append(Path(meipass) / "monitor" / "dashboard.html")
+        candidates.append(Path(meipass) / "dashboard.html")
+    candidates.append(Path(__file__).resolve().parent / "monitor" / "dashboard.html")
+    for p in candidates:
+        try:
+            if p.exists():
+                return p
+        except Exception:
+            pass
+    return None
+
+def ensure_dashboard_file():
+    """Copy the bundled dashboard to a stable path.
+
+    Opening a file from PyInstaller's changing _MEI temp dir would give the
+    browser a new origin on every launch, losing the saved repo/token. A stable
+    copy in DATA_DIR keeps the dashboard's localStorage setup between runs.
+    """
+    src = _bundled_dashboard_source()
+    if src:
+        try:
+            data = src.read_bytes()
+            if (not DASHBOARD_FILE.exists()) or DASHBOARD_FILE.read_bytes() != data:
+                DASHBOARD_FILE.parent.mkdir(parents=True, exist_ok=True)
+                tmp = DASHBOARD_FILE.with_name(DASHBOARD_FILE.name + ".tmp")
+                tmp.write_bytes(data)
+                tmp.replace(DASHBOARD_FILE)
+                log(f"Dashboard: updated local copy {DASHBOARD_FILE}")
+        except Exception as e:
+            log_warn(f"Dashboard: could not update local copy: {e}")
+    if DASHBOARD_FILE.exists():
+        return DASHBOARD_FILE
+    return src
+
+def open_dashboard():
+    """Open the monitoring dashboard in the default browser (Logs button)."""
+    p = None
+    try:
+        p = ensure_dashboard_file()
+        if not p:
+            log_error("Dashboard: dashboard.html not found (not bundled and no local copy)")
+            return
+        log(f"Dashboard: opening {p}")
+        if hasattr(os, "startfile"):
+            os.startfile(str(p))
+        else:
+            import webbrowser
+            webbrowser.open(p.as_uri())
+    except Exception as e:
+        log_error(f"Dashboard: failed to open: {e}")
+        if p:
+            try:
+                import webbrowser
+                webbrowser.open(p.as_uri())
+            except Exception as e2:
+                log_error(f"Dashboard: browser fallback failed: {e2}")
 
 # ---------- GITHUB LOG SHIPPING ----------
 # Every running copy periodically uploads its log so the parent PC can read all
@@ -1645,32 +1794,6 @@ def _upload_status_once() -> bool:
         log(f"LogShip: status heartbeat -> {path}")
     return ok
 
-def _flush_telemetry(reason: str = ""):
-    """Best-effort immediate push of status + log to the logs repo.
-
-    Used for (a) an instant startup heartbeat so a new version's launch is visible,
-    and (b) flush-on-crash so a fatal error reports itself before the process dies -
-    instead of waiting for the next periodic cycle that may never run. No-op (and
-    never raises) when there is no token or no network.
-    """
-    try:
-        if not _read_token():
-            return
-    except Exception:
-        return
-    try:
-        write_status()
-    except Exception:
-        pass
-    try:
-        _upload_status_once()
-    except Exception:
-        pass
-    try:
-        _upload_log_once()
-    except Exception:
-        pass
-
 def logship_thread():
     """Ship status.json (every STATUS_UPLOAD_EVERY_SEC) and the log tail (every
     LOG_UPLOAD_EVERY_SEC) to the private logs repo. Silent when no token file."""
@@ -1753,7 +1876,8 @@ def add_bonus_time(seconds: int = BONUS_STEP_SEC):
         return state
 
 def hotkey_listener_thread():
-    """Global hotkeys: Ctrl+Alt+T -> +15 min, Ctrl+Shift+D -> disable+exit, Ctrl+Alt+D -> disable for today."""
+    """Global hotkeys: Ctrl+Alt+T -> +15 min, Ctrl+Alt+D -> toggle disable/re-enable,
+    Ctrl+Shift+D -> disable+exit (or re-enable if already disabled)."""
     global APP_DISABLED
     try:
         user32 = ctypes.windll.user32
@@ -1782,13 +1906,13 @@ def hotkey_listener_thread():
     if not ok2:
         log(f"Hotkey: RegisterHotKey Ctrl+Shift+D failed, error {kernel32.GetLastError()}")
     else:
-        log("Hotkey registered: Ctrl+Shift+D = disable for today + exit (auto re-enables tomorrow)")
+        log("Hotkey registered: Ctrl+Shift+D = disable for today + exit (re-enables if already disabled)")
 
     ok3 = user32.RegisterHotKey(None, HOTKEY_ID_CLOSE, MOD_CONTROL | MOD_ALT, VK_D)
     if not ok3:
         log(f"Hotkey: RegisterHotKey Ctrl+Alt+D failed, error {kernel32.GetLastError()}")
     else:
-        log("Hotkey registered: Ctrl+Alt+D = disable for today (auto re-enables tomorrow)")
+        log("Hotkey registered: Ctrl+Alt+D = toggle disable/re-enable for today")
 
     if not ok1 and not ok2 and not ok3:
         return
@@ -1816,21 +1940,25 @@ def hotkey_listener_thread():
                         import traceback
                         log(traceback.format_exc())
                 elif msg.wParam == HOTKEY_ID_DISABLE:
-                    log("Hotkey pressed: Ctrl+Shift+D - disable for today + exit")
                     try:
-                        disable_app()
+                        if is_disabled():
+                            log("Hotkey pressed: Ctrl+Shift+D - already disabled, re-enabling (staying open)")
+                            enable_app()
+                        else:
+                            log("Hotkey pressed: Ctrl+Shift+D - disable for today + exit")
+                            disable_app()
                     except Exception as e:
                         log(f"Disable hotkey error: {e}")
                 elif msg.wParam == HOTKEY_ID_CLOSE:
-                    log("Hotkey pressed: Ctrl+Alt+D - disabling for today (auto re-enables tomorrow, app keeps running)")
                     try:
-                        with _state_lock:
-                            st = load_state()
-                            st["disabled_date"] = datetime.date.today().isoformat()
-                            save_state(st)
-                        APP_DISABLED = True
+                        if is_disabled():
+                            log("Hotkey pressed: Ctrl+Alt+D - currently disabled, re-enabling")
+                            enable_app()
+                        else:
+                            log("Hotkey pressed: Ctrl+Alt+D - disabling for today (press again to re-enable)")
+                            set_disabled_for_today(True)
                     except Exception as e:
-                        log(f"Disable-for-today error: {e}")
+                        log(f"Disable hotkey error: {e}")
             user32.TranslateMessage(ctypes.byref(msg))
             user32.DispatchMessageW(ctypes.byref(msg))
     finally:
@@ -1852,8 +1980,8 @@ def console_thread():
         log("=" * 60)
         log(f" Weekday limit: {WEEKDAY_LIMIT_SEC//60} min | Weekend: {WEEKEND_LIMIT_SEC//60} min | Warning: {WARNING_BEFORE_SEC//60} min before")
         log(f" Hotkey: Ctrl+Alt+T = +15 min for today (resets tomorrow)")
-        log(f" Hotkey: Ctrl+Shift+D = disable for today + exit (auto re-enables tomorrow)")
-        log(f" Hotkey: Ctrl+Alt+D = disable for today (auto re-enables tomorrow)")
+        log(f" Hotkey: Ctrl+Alt+D = toggle disable/re-enable for today")
+        log(f" Hotkey: Ctrl+Shift+D = disable for today + exit (re-enables if already disabled)")
         if is_browser_block_exempt():
             log(f" Browser block: OFF on this PC (exempt) - your browsers will NOT be closed")
         else:
@@ -1887,7 +2015,7 @@ def console_thread():
             gstatus = ("RUNNING: " + ", ".join(games_now[:3])) if running else "not running"
             # Color not needed, plain text
             if is_disabled():
-                line = f"[{ts}] *** DISABLED *** | PlayLimit is OFF | Used {format_minutes(used)} | Left {format_minutes(remaining)} | Games {gstatus} | Browser block OFF | Press reboot or delete {DISABLE_FLAG_FILE} to re-enable"
+                line = f"[{ts}] *** DISABLED *** | PlayLimit is OFF | Used {format_minutes(used)} | Left {format_minutes(remaining)} | Games {gstatus} | Browser block OFF | Press Ctrl+Alt+D to re-enable (auto re-enables tomorrow)"
             elif is_browser_block_exempt():
                 line = f"[{ts}] {day_type} | Base {base//60}min + Bonus {bonus//60}min = {limit//60}min | Used {format_minutes(used)} | Left {format_minutes(remaining)} | Games {gstatus} {'(WARNED)' if warned else ''} | Browser OFF (exempt)"
             else:
@@ -2009,9 +2137,15 @@ def show_time_window():
                 pass
             threading.Thread(target=force_update_check, daemon=True).start()
 
+        def on_logs_btn():
+            threading.Thread(target=open_dashboard, daemon=True).start()
+
         tk.Button(btn_frame, text="Update", command=on_update_btn,
                   font=("Segoe UI", 8), bg="#2d2d44", fg="#bbbbbb",
-                  relief="flat", padx=8, pady=1).pack()
+                  relief="flat", padx=8, pady=1).pack(side="left", padx=(0, 6))
+        tk.Button(btn_frame, text="Logs", command=on_logs_btn,
+                  font=("Segoe UI", 8), bg="#2d2d44", fg="#bbbbbb",
+                  relief="flat", padx=8, pady=1).pack(side="left")
 
         # Session history grid (newest top, live session ticks from available data).
         # Read-only labels, updated in place every refresh - safe for kids.
@@ -2118,7 +2252,7 @@ def show_time_window():
         # Those all arrive as WM_CLOSE -> ignored here (logged only).
         # Parent exits via Ctrl+Shift+D hotkey or Task Manager as Admin (TerminateProcess
         # cannot be blocked); both do a full shutdown so no traces are left behind.
-        # Ctrl+Alt+D only disables enforcement for today (app keeps running).
+        # Ctrl+Alt+D toggles enforcement for today (app keeps running).
         # Register this root so request_shutdown() can destroy it from hotkeys.
         global _tk_root
         _tk_root = root
@@ -2734,7 +2868,7 @@ def main_loop():
         log(f"STATUS: ACTIVE - Browser block OFF on this PC (exempt) | Game limit ON")
     else:
         log(f"STATUS: ACTIVE - Browser block ON ({', '.join(BROWSER_PROCESSES)})")
-    log(f"Weekday limit: {WEEKDAY_LIMIT_SEC//60} min, Weekend: {WEEKEND_LIMIT_SEC//60} min, Warning: {WARNING_BEFORE_SEC//60} min before, Bonus step: {BONUS_STEP_SEC//60} min via Ctrl+Alt+T, Disable: Ctrl+Shift+D")
+    log(f"Weekday limit: {WEEKDAY_LIMIT_SEC//60} min, Weekend: {WEEKEND_LIMIT_SEC//60} min, Warning: {WARNING_BEFORE_SEC//60} min before, Bonus step: {BONUS_STEP_SEC//60} min via Ctrl+Alt+T, Disable/re-enable: Ctrl+Alt+D, Disable+exit: Ctrl+Shift+D")
     log(f"Watching: {', '.join(TARGET_PROCESSES)}")
     log(f"psutil available: {HAS_PSUTIL}")
 
@@ -2794,20 +2928,12 @@ def main_loop():
     except Exception as e:
         log(f"Failed to start logship thread: {e}")
 
-    # Immediate startup heartbeat: push status+log once right now (in the background)
-    # so a just-launched version is visible on the dashboard without waiting for the
-    # first periodic cycle - the fastest signal that vX actually started up.
-    try:
-        threading.Thread(target=_flush_telemetry, args=("startup",), daemon=True, name="StartupHeartbeat").start()
-    except Exception as e:
-        log(f"Failed to start startup heartbeat: {e}")
-
     with _state_lock:
         state = load_state()
         save_state(state)
         APP_DISABLED = (state.get("disabled_date") == datetime.date.today().isoformat())
         if APP_DISABLED:
-            log("Startup: disabled for today (Ctrl+Alt+D) - will auto re-enable tomorrow")
+            log("Startup: disabled for today - press Ctrl+Alt+D to re-enable now (auto re-enables tomorrow)")
 
     # Write an initial heartbeat so the monitor shows this machine immediately.
     write_status(state, None)
@@ -2856,7 +2982,7 @@ def main_loop():
             if is_disabled():
                 # Still sleep and continue; console will show DISABLED
                 if int(time.time()) % 60 == 0:
-                    log("PlayLimit DISABLED for today - skipping all checks (auto re-enables tomorrow)")
+                    log("PlayLimit DISABLED for today - skipping all checks (Ctrl+Alt+D to re-enable; auto re-enables tomorrow)")
                 _shutdown.wait(POLL_INTERVAL_SEC)
                 continue
 
@@ -3009,6 +3135,14 @@ def main_loop():
     # disable), today's used time is already on disk - the restart loses nothing.
     try:
         with _state_lock:
+            # The disable hotkey writes disabled_date straight to disk, but the
+            # loop's in-memory `state` may predate that write. Re-read the disk
+            # value so a Ctrl+Shift+D shutdown cannot overwrite "disabled today"
+            # with None (which would silently re-enable on the next launch).
+            try:
+                state["disabled_date"] = load_state().get("disabled_date")
+            except Exception:
+                pass
             save_state(state)
         write_status(state, None)
         log(f"Shutdown: flushed today's time ({format_minutes(state.get('used_seconds', 0))} used)")
@@ -3019,8 +3153,10 @@ if __name__ == "__main__":
     # Capture any uncaught exception (main + worker threads) into the log/status.
     _install_excepthooks()
 
-    # Canary mode (spawned by the updater before a hop): prove this exe launches and
-    # report our real version, then exit. MUST be first - no mutex/install/threads.
+    # Update canary probe: the updater launches a staged exe as `--selfcheck` to
+    # prove it starts and reports the right version before committing a hop. Keep
+    # this branch FIRST and side-effect-free (no mutex/install/threads/network).
+    # NEVER remove it - it is the self-update safety contract (see AGENTS.md).
     if "--selfcheck" in sys.argv:
         _run_selfcheck_mode()
 
@@ -3077,11 +3213,10 @@ if __name__ == "__main__":
     try:
         sv = _pending_staged_version()
         if sv:
-            # Canary first: only hop if the staged exe proves it launches and is the
-            # version it claims. A bad/stale staged exe is quarantined+deleted here,
-            # and we fall through to run the current (working) version instead.
+            log(f"Updater: pending staged v{sv} at startup - hopping to latest before opening")
+            # Canary-gate the startup hop too: a staged exe that cannot prove it
+            # launches/reports v{sv} is quarantined + dropped, and we keep running.
             if _canary_gate(sv):
-                log(f"Updater: pending staged v{sv} at startup - hopping to latest before opening")
                 _spawn_hop_helper_only(sv)
                 sys.exit(0)
             else:

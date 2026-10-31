@@ -29,18 +29,22 @@ SUN = datetime.date(2026, 10, 25)
 
 
 class _TempDataDir(unittest.TestCase):
-    """Base class: point all state/status/log files at a fresh temp dir."""
+    """Base class: point all state/status/log/history files at a fresh temp dir."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         d = Path(self._tmp.name)
-        self._saved = {k: getattr(al, k) for k in (
-            "DATA_DIR", "STATE_FILE", "STATUS_FILE", "LOG_FILE",
-            "SELFCHECK_FILE", "UPDATE_GUARD_FILE")}
+        self._saved = {k: getattr(al, k) for k in
+                       ("DATA_DIR", "STATE_FILE", "STATUS_FILE", "LOG_FILE", "HISTORY_FILE",
+                        "DASHBOARD_FILE", "DISABLE_FLAG_FILE",
+                        "SELFCHECK_FILE", "UPDATE_GUARD_FILE")}
         al.DATA_DIR = d
         al.STATE_FILE = d / "state.json"
         al.STATUS_FILE = d / "status.json"
         al.LOG_FILE = d / "limiter.log"
+        al.HISTORY_FILE = d / "history.json"
+        al.DASHBOARD_FILE = d / "dashboard.html"
+        al.DISABLE_FLAG_FILE = d / "disabled.flag"
         al.SELFCHECK_FILE = d / "selfcheck.json"
         al.UPDATE_GUARD_FILE = d / "update_guard.json"
         # reset the in-memory issue buffer between tests
@@ -303,6 +307,49 @@ class TestBrowserAllowWindow(_TempDataDir):
     def test_reason_mentions_school_it(self):
         reason = al.browser_allow_window_now(datetime.datetime(2026, 10, 20, 9, 0))
         self.assertIn("School IT", reason)
+
+
+class TestDisableToggle(_TempDataDir):
+    def test_set_and_clear_disabled_date(self):
+        al.APP_DISABLED = False
+        al.set_disabled_for_today(True)
+        self.assertTrue(al.is_disabled())
+        self.assertEqual(al.load_state()["disabled_date"], datetime.date.today().isoformat())
+
+        al.set_disabled_for_today(False)
+        self.assertFalse(al.is_disabled())
+        self.assertIsNone(al.load_state()["disabled_date"])
+
+    def test_enable_app_clears_legacy_flag(self):
+        al.DISABLE_FLAG_FILE.write_text("stale", encoding="utf-8")
+        al.APP_DISABLED = True
+        al.enable_app()
+        self.assertFalse(al.is_disabled())
+        self.assertFalse(al.DISABLE_FLAG_FILE.exists())
+
+
+class TestDashboard(_TempDataDir):
+    def test_ensure_dashboard_file_copies_bundled_html(self):
+        p = al.ensure_dashboard_file()
+        self.assertIsNotNone(p)
+        self.assertEqual(p, al.DASHBOARD_FILE)
+        self.assertTrue(p.exists())
+        self.assertIn("PlayLimit Monitor", p.read_text(encoding="utf-8"))
+        # Second call is safe and keeps the same stable path.
+        self.assertEqual(al.ensure_dashboard_file(), p)
+
+
+class TestUpdaterEnvironment(unittest.TestCase):
+    def test_clean_pyi_env_strips_private_onefile_vars(self):
+        os.environ["_PYI_TEST_VALUE"] = "1"
+        os.environ["PLAYLIMIT_KEEP_TEST"] = "1"
+        self.addCleanup(os.environ.pop, "_PYI_TEST_VALUE", None)
+        self.addCleanup(os.environ.pop, "PLAYLIMIT_KEEP_TEST", None)
+
+        env = al._clean_pyi_env()
+        self.assertNotIn("_PYI_TEST_VALUE", env)
+        self.assertEqual(env["PLAYLIMIT_KEEP_TEST"], "1")
+        self.assertEqual(env["PYINSTALLER_RESET_ENVIRONMENT"], "1")
 
 
 class TestHistory(_TempDataDir):

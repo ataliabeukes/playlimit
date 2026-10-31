@@ -1,9 +1,14 @@
 name: Build Windows exe
 
-# Builds PlayLimit.exe on a real Windows runner (PyInstaller does NOT cross-compile),
-# generates the matching .sha256, and uploads both as a downloadable artifact.
-# The maintainer then commits dist/PlayLimit.exe + dist/PlayLimit.exe.sha256 to the
-# branch themselves (GPG-signed) — see AGENTS.md "Release gate".
+# Builds the published dist\PlayLimit.exe on a real Windows runner (PyInstaller does
+# NOT cross-compile, and the native C# launcher needs csc.exe which only exists on
+# Windows). This runs the SAME build.ps1 the maintainer uses locally, so CI and local
+# builds are identical: a PyInstaller onefile "real app" wrapped in a native launcher
+# that strips PyInstaller's private _PYI_* env (fixing the onefile parent-process
+# security validation / "Failed to load Python DLL" update brick).
+#
+# The maintainer then commits dist/PlayLimit.exe + dist/PlayLimit.exe.sha256 (GPG-signed)
+# and only AFTER that bumps version.txt — see AGENTS.md "Release gate".
 
 on:
   workflow_dispatch:
@@ -15,6 +20,10 @@ on:
       - "version.txt"
       - "version_info.txt"
       - "playlimit.ico"
+      - "splash.png"
+      - "monitor/dashboard.html"
+      - "bootstrap/**"
+      - "build.ps1"
       - ".github/workflows/build-exe.yml"
 
 permissions:
@@ -35,11 +44,10 @@ jobs:
 
       - name: Install build dependencies
         # Pin PyInstaller to 6.22.0 — the newest release BEFORE the onefile
-        # parent-process security validation added in 6.22.1 (#9492). That check
-        # aborts elevated onefile launches (PlayLimit runs via Task Scheduler at
-        # RunLevel Highest, re-spawned by the self-hop updater) with
-        # "security validation failure: failed to obtain executable path for
-        # parent process". 6.22.0 has no such check. Do NOT bump past 6.22.0
+        # parent-process security validation added in 6.22.1 (#9492). The native
+        # launcher already neutralises the _PYI_* leak, but PlayLimit also runs
+        # elevated via Task Scheduler (RunLevel Highest), and 6.22.3's check fires
+        # on elevated launches. 6.22.0 has no such check. Do NOT bump past 6.22.0
         # without re-testing an elevated launch on a real Windows box.
         run: |
           python -m pip install --upgrade pip
@@ -51,22 +59,19 @@ jobs:
           Write-Host "version.txt      = $(Get-Content version.txt)"
           Write-Host "__version__ line = $(Select-String -Path albion_limiter.py -Pattern '^__version__' | Select-Object -First 1)"
 
-      - name: Build PlayLimit.exe
-        # Use `python` (the setup-python 3.12 on PATH where PyInstaller was installed),
-        # NOT `py` — the py launcher may resolve to a different Python on the runner.
-        run: >
-          python -m PyInstaller --onefile --noconsole --name PlayLimit
-          --icon playlimit.ico --version-file version_info.txt
-          --distpath dist --workpath build --specpath .
-          --hidden-import pystray --hidden-import PIL --hidden-import psutil
-          albion_limiter.py
+      - name: Build native-launcher PlayLimit.exe (build.ps1)
+        shell: pwsh
+        # PLAYLIMIT_PYTHON=python so build.ps1 uses the setup-python 3.12 where
+        # PyInstaller was installed (the `py` launcher may resolve elsewhere).
+        env:
+          PLAYLIMIT_PYTHON: python
+        run: .\build.ps1
 
-      - name: Generate SHA256
+      - name: Show build output
         shell: pwsh
         run: |
-          $sha = (Get-FileHash dist\PlayLimit.exe -Algorithm SHA256).Hash
-          "$sha  PlayLimit.exe" | Set-Content dist\PlayLimit.exe.sha256 -NoNewline
-          Write-Host "SHA256 = $sha"
+          Get-Item dist\PlayLimit.exe | Format-List Name, Length, VersionInfo
+          Write-Host "sha256 file:"; Get-Content dist\PlayLimit.exe.sha256
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

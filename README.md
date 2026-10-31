@@ -9,7 +9,7 @@ Limits Albion Online playtime for kids:
 - **Browser block: Chrome/Edge/Firefox/Brave/Opera etc. are auto-closed**
 - **Scheduled browser exception: browsers are allowed Tuesdays 08:00–13:30 (school IT class)**
 - **Not closable by kids:** close button disabled, Ctrl+C ignored, auto-restarts if killed, runs as SYSTEM when possible
-- **Parent hotkeys: `Ctrl+Alt+T` +15 min, `Ctrl+Shift+D` DISABLE app** (resets tomorrow / creates disabled flag)
+- **Parent hotkeys: `Ctrl+Alt+T` +15 min, `Ctrl+Alt+D` toggle disable/re-enable, `Ctrl+Shift+D` disable + exit**
 
 ## How It Works
 
@@ -20,18 +20,21 @@ Limits Albion Online playtime for kids:
 - **Browser block:** any browser (`chrome.exe`, `msedge.exe`, `firefox.exe`, `brave.exe`, `opera.exe`, `vivaldi.exe`, `iexplore.exe`...) is terminated within 5 seconds
 - Uses Task Scheduler + Startup shortcut so it survives reboots
 - **Not closable:** console X disabled, `Ctrl+C`/close ignored, task set `AllowHardTerminate=$false` + `RestartCount 10` (restarts in 1 min if killed), tries to run as `SYSTEM` (standard users get Access Denied), `Protect: anti-close enabled`
-- **Disable:** `Ctrl+Shift+D` creates `%ProgramData%\AlbionLimiter\disabled.flag` and disables task — delete flag + reboot to re-enable
+- **Disable:** `Ctrl+Alt+D` toggles disable/re-enable for today while the app keeps running; `Ctrl+Shift+D` disables + exits. Both clear automatically at midnight — no `disabled.flag` and no scheduled-task changes
 
 ## Files
 
 | File | Description |
 |------|-------------|
 | `albion_limiter.py` | Main service — polling + hotkey + auto-update + log/status shipping |
-| `dist/PlayLimit.exe` | Latest compiled executable (auto-updated on launch) |
+| `dist/PlayLimit.exe` | Native launcher wrapping the real app (auto-updated on launch) |
+| `build.ps1` | Builds the real app + native launcher + SHA in one step |
+| `bootstrap/` | C# source for the native launcher/apply helper |
 | `install.ps1` | Installer (run as Administrator) |
 | `install.bat` | Batch wrapper for installer |
 | `uninstall.ps1` | Uninstaller (run as Administrator) |
-| `monitor/dashboard.html` | Remote monitoring dashboard — open locally in a browser |
+| `repair.bat` / `repair.ps1` | One-click repair/forced update for a machine stuck on an old version |
+| `monitor/dashboard.html` | Remote monitoring dashboard - bundled into the exe and opened by the **Logs** button |
 | `test_matcher.py` | Game-detection matcher tests |
 | `test_basic.py` | Unit tests: limits, state, sessions, status, logging |
 | `README.txt` | Plain-text docs |
@@ -94,28 +97,51 @@ Two extra signals make a bad deploy visible instead of silent:
 Logs*. A failure that prevents the exe from starting **at all** can't self-report;
 that shows up as the host going offline on the dashboard right after a version bump.)
 
-Build + publish a new version (example v1.4.0):
+Build + publish a new version (example v1.7.6):
 ```powershell
-# IMPORTANT: pin PyInstaller to 6.22.0. 6.22.1+ adds a onefile parent-process
-# security check that aborts PlayLimit's ELEVATED launch (Task Scheduler
-# RunLevel Highest + self-hop) with "security validation failure: failed to
-# obtain executable path for parent process". Do not bump past 6.22.0 without
-# re-testing an elevated launch on a real Windows box.
+# Pin PyInstaller to 6.22.0 first (the CI workflow does this automatically).
+# 6.22.1+ adds a onefile parent-process security check that aborts PlayLimit's
+# ELEVATED launch (Task Scheduler RunLevel Highest) with "security validation
+# failure: failed to obtain executable path for parent process". The native
+# launcher neutralises the _PYI_* leak, but the elevated check still applies, so
+# do not bump past 6.22.0 without re-testing an elevated launch on a real box.
 pip install "pyinstaller==6.22.0" pystray pillow psutil
-py -m PyInstaller --onefile --noconsole --name PlayLimit --icon playlimit.ico --version-file version_info.txt --distpath dist --workpath build --specpath . --hidden-import pystray --hidden-import PIL --hidden-import psutil albion_limiter.py
-$sha = (Get-FileHash dist\PlayLimit.exe -Algorithm SHA256).Hash
-"$sha  PlayLimit.exe" | Set-Content dist\PlayLimit.exe.sha256 -NoNewline
+.\build.ps1
 git add albion_limiter.py version.txt version_info.txt dist/PlayLimit.exe dist/PlayLimit.exe.sha256
-git commit -m "v1.4.0 ..."
+git commit -m "v1.7.6 ..."
 git push
 ```
-`version.txt` must contain the new version (e.g. `1.4.0`) or clients will not pick it up.
+
+> **macOS maintainers:** you cannot run `build.ps1` locally (needs Windows +
+> `csc.exe`). Use the **Build Windows exe** GitHub Actions workflow instead — it
+> runs the exact same `build.ps1` on `windows-latest`, then download the
+> `PlayLimit-exe` artifact and commit `dist/PlayLimit.exe` + `.sha256`.
+`build.ps1` builds the real PyInstaller app, wraps it in the native
+`dist\PlayLimit.exe` **launcher**, regenerates the SHA, and verifies both versions.
+
+**Why a launcher?** The old updater launches the downloaded exe with PyInstaller's
+private `_PYI_*` variables in its environment, which can make a normal PyInstaller
+exe fail with `Failed to load Python DLL`. The launcher is native: it ignores those
+variables, installs the real app over itself, and starts the real app with a clean
+environment. Old and new clients can both update normally.
+
+`version.txt` must contain the new version (e.g. `1.7.6`) or clients will not pick
+it up. Never commit a `version.txt` bump without rebuilding `dist/PlayLimit.exe`.
 
 > **Versioning policy (see `AGENTS.md`):** bump the version on *every* change —
-> `__version__`, `version_info.txt`, and `version.txt` in lockstep. All are now at
-> `1.7.2`. **Before releasing/merging a `version.txt` bump you must rebuild**
-> `dist/PlayLimit.exe` + `dist/PlayLimit.exe.sha256` on Windows and commit them in
-> the same change — otherwise clients "update" to the stale exe still in `dist/`.
+> `__version__`, `version_info.txt`, and `version.txt` in lockstep, then run
+> `build.ps1` (or the CI workflow) and commit the rebuilt launcher + SHA in the
+> same change. **Never release/merge a `version.txt` bump ahead of the rebuilt
+> `dist/PlayLimit.exe` + `.sha256`** — otherwise clients "update" to the stale exe
+> still in `dist/` (the canary + `BAD_VER` guard will refuse it, but it's noisy).
+
+### If a machine was already left with a broken exe
+
+`repair.bat` is a last-resort one-click forced update for a machine whose live exe
+will not start at all (e.g. stuck on a pre-launcher version). It downloads and
+verifies the latest `dist/PlayLimit.exe` from the ataliabeukes repo and replaces the
+live copy. 1.7.5+ machines generally don't need it — the native launcher handles the
+old updater's `_PYI_*` environment automatically.
 
 ## Installation (none needed — just open the exe)
 
@@ -143,11 +169,18 @@ git push
 - Popup confirms: *"Bonus Added! New total: X min"*
 - If game was already blocked, unblocks it immediately
 
-**`Ctrl+Shift+D`** — **DISABLE PlayLimit** (parent override):
-- Instantly stops all blocking (Albion + browsers allowed)
-- Creates `%ProgramData%\AlbionLimiter\disabled.flag` and disables scheduled task `AlbionLimiter`
-- Console shows `*** DISABLED ***`
-- To re-enable: `Remove-Item C:\ProgramData\AlbionLimiter\disabled.flag; Enable-ScheduledTask -TaskName AlbionLimiter` or delete flag and reboot
+**`Ctrl+Alt+D`** — **toggle disable / re-enable for today** (app keeps running):
+- First press: instantly stops all blocking (Albion + browsers allowed), window/console shows `*** DISABLED ***`
+- Press the **same combo again**: re-enables all limits immediately, no restart needed
+- While disabled, `Ctrl+Alt+T` is ignored
+- Clears automatically at midnight
+
+**`Ctrl+Shift+D`** — **disable + exit** (parent override):
+- If enabled: disables for today and exits the app
+- If already disabled (e.g. after `Ctrl+Alt+D`): re-enables and keeps running instead of exiting
+- If the app exited, relaunch **PlayLimit Time**; it stays disabled for that day until you press `Ctrl+Alt+D`
+
+There is no `disabled.flag` and the scheduled task is never disabled by these hotkeys.
 
 Config in `albion_limiter.py`:
 ```python
@@ -305,7 +338,10 @@ Example `state.json`:
 step) that shows every machine's live status by reading the private logs repo
 directly in your browser.
 
-**Open it:** double-click `monitor/dashboard.html` (or host it anywhere static).
+**Open it:** click the **Logs** button in the PlayLimit window (v1.7.4+), or
+double-click `monitor/dashboard.html` (or host it anywhere static). The Logs button
+opens a stable local copy at `%ProgramData%\AlbionLimiter\dashboard.html`, so the
+browser remembers your repo/token between runs.
 On first run it asks for:
 - the logs repo (`ataliabeukes/playlimit-logs`), and
 - a GitHub **fine-grained, read-only** token (Contents → **Read-only**, scoped to
