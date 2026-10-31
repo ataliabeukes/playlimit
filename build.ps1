@@ -54,10 +54,15 @@ if ($LASTEXITCODE -ne 0) { throw "csc failed building ApplyHelper" }
 
 # 4) Launcher with the real app + helper embedded.
 New-Item -ItemType Directory -Force -Path dist | Out-Null
+# Build the /resource: args as explicit strings. Inline `/resource:$real,Payload`
+# is mis-parsed by PowerShell 7 (the CI shell): the embedded comma splits the token
+# and $real is passed to csc unexpanded, giving "error CS1566: reading '$real'".
+$payloadRes = "/resource:$real,Payload"
+$helperRes = "/resource:bootstrap\ApplyHelper.exe,ApplyHelper"
 & $csc /nologo /target:winexe /optimize+ /win32icon:playlimit.ico `
     /reference:System.dll /reference:System.Core.dll `
     /out:dist\PlayLimit.exe `
-    /resource:$real,Payload /resource:bootstrap\ApplyHelper.exe,ApplyHelper `
+    $payloadRes $helperRes `
     bootstrap\Launcher.cs bootstrap\VersionInfo.cs
 if ($LASTEXITCODE -ne 0) { throw "csc failed building Launcher" }
 
