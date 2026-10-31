@@ -20,7 +20,7 @@ import threading
 import collections
 from pathlib import Path
 
-__version__ = "1.7.8"
+__version__ = "1.7.9"
 APP_NAME = "PlayLimit"
 
 # ---------- CONFIG ----------
@@ -154,59 +154,6 @@ def is_browser_block_exempt() -> bool:
     except Exception:
         pass
     return False
-
-# ---------- DASHBOARD BROWSER EXCLUSION ----------
-# The monitoring dashboard is an HTML page the parent opens IN a browser. Because
-# the browser block kills whole processes (it can't spare a single tab), we pause
-# the block while the dashboard is in use so the parent can read logs / enter the
-# GitHub token without the tab being closed. Two triggers:
-#   1) a visible window whose title contains "PlayLimit Monitor" (the dashboard
-#      page title) is the foreground tab, and
-#   2) a short grace period right after the Logs button opens it (covers the few
-#      seconds of navigation before the title is set).
-DASHBOARD_WINDOW_TITLE = "playlimit monitor"   # lower-cased substring match
-DASHBOARD_OPEN_GRACE_SEC = 180                 # pause block this long after Logs-button open
-_dashboard_opened_ts = 0.0                     # set by open_dashboard()
-
-def _dashboard_window_open() -> bool:
-    """True if a visible window titled like the dashboard ('PlayLimit Monitor ...')
-    exists. Windows-only (EnumWindows); returns False everywhere else."""
-    try:
-        import ctypes
-        from ctypes import wintypes
-        user32 = ctypes.windll.user32
-        hit = {"v": False}
-        EnumProc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
-
-        def _cb(hwnd, _lparam):
-            try:
-                if not user32.IsWindowVisible(hwnd):
-                    return True
-                length = user32.GetWindowTextLengthW(hwnd)
-                if length and length > 0:
-                    buf = ctypes.create_unicode_buffer(length + 1)
-                    user32.GetWindowTextW(hwnd, buf, length + 1)
-                    if DASHBOARD_WINDOW_TITLE in (buf.value or "").lower():
-                        hit["v"] = True
-                        return False  # stop enumerating
-            except Exception:
-                pass
-            return True
-
-        user32.EnumWindows(EnumProc(_cb), 0)
-        return hit["v"]
-    except Exception:
-        return False
-
-def dashboard_block_pause() -> bool:
-    """True when the browser block should be paused for the dashboard (window open
-    OR within the post-Logs-button grace window)."""
-    try:
-        if _dashboard_opened_ts and (time.time() - _dashboard_opened_ts) < DASHBOARD_OPEN_GRACE_SEC:
-            return True
-    except Exception:
-        pass
-    return _dashboard_window_open()
 
 # App control
 APP_DISABLED = False  # set by Ctrl+Alt+D / Ctrl+Shift+D hotkeys
@@ -673,7 +620,7 @@ def build_status(state: dict = None, games_now=None) -> dict:
     except Exception:
         allow_reason = None
     try:
-        browser_block = (not is_browser_block_exempt()) and (not disabled) and (not allow_reason) and (not dashboard_block_pause())
+        browser_block = (not is_browser_block_exempt()) and (not disabled) and (not allow_reason)
     except Exception:
         browser_block = False
     with _errors_lock:
@@ -1727,12 +1674,8 @@ def ensure_dashboard_file():
 
 def open_dashboard():
     """Open the monitoring dashboard in the default browser (Logs button)."""
-    global _dashboard_opened_ts
     p = None
     try:
-        # Pause the browser block right away so the tab we're about to open (and the
-        # few seconds of navigation before its title is set) is not killed.
-        _dashboard_opened_ts = time.time()
         p = ensure_dashboard_file()
         if not p:
             log_error("Dashboard: dashboard.html not found (not bundled and no local copy)")
@@ -2591,7 +2534,7 @@ def is_albion_running() -> bool:
 def is_browser_running() -> bool:
     """Check if any browser process is running (for blocking). Returns False while
     a scheduled allow-window is active (e.g. Tuesday school IT) so browsers stay open."""
-    if is_disabled() or is_browser_block_exempt() or browser_allow_window_now() or dashboard_block_pause():
+    if is_disabled() or is_browser_block_exempt() or browser_allow_window_now():
         return False
     names_lower = [n.lower() for n in BROWSER_PROCESSES]
     if HAS_PSUTIL:
@@ -2645,9 +2588,8 @@ def get_running_browsers():
 
 def kill_browsers():
     """Close any browser process immediately - unless a scheduled allow-window is
-    active (e.g. Tuesday school IT) or the monitoring dashboard is open, in which
-    case browsers are left open."""
-    if is_disabled() or is_browser_block_exempt() or browser_allow_window_now() or dashboard_block_pause():
+    active (e.g. Tuesday school IT), in which case browsers are left open."""
+    if is_disabled() or is_browser_block_exempt() or browser_allow_window_now():
         return False
     killed = False
     names_lower = [n.lower() for n in BROWSER_PROCESSES]

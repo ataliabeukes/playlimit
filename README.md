@@ -343,14 +343,12 @@ double-click `monitor/dashboard.html` (or host it anywhere static). The Logs but
 opens a stable local copy at `%ProgramData%\AlbionLimiter\dashboard.html`, so the
 browser remembers your repo/token between runs.
 
-**Dashboard vs. the browser block (v1.7.8+):** the browser block kills whole
-browser processes, so it can't spare a single tab. While the dashboard is open the
-block is **paused** so you can read logs and enter the GitHub token without the tab
-being closed. The pause triggers when the dashboard tab is foreground (its window
-title contains *"PlayLimit Monitor"*) and for ~3 minutes after the Logs button opens
-it. Note: because the pause lifts the block entirely, keep the dashboard tab in the
-foreground while using it — switching that window to another site resumes blocking.
-On first run it asks for:
+**Dashboard vs. the browser block:** the browser block kills whole browser
+processes, so it can't spare a single tab. On a PC where the browser block is
+active, open the dashboard somewhere the block is paused — a browser-block-exempt
+machine (`PLAYLIMIT_EXEMPT=1` or the `no_browser_block` flag file), during the
+scheduled allow-window, or on another device — or view the logs repo directly.
+On first run the dashboard asks for:
 - the logs repo (`ataliabeukes/playlimit-logs`), and
 - a GitHub **fine-grained, read-only** token (Contents → **Read-only**, scoped to
   **only** the logs repo). This is different from the machines' write token — the

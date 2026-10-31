@@ -11,7 +11,6 @@ ProgramData state (each test redirects the data files to a temp dir).
 import os
 import sys
 import json
-import time
 import datetime
 import tempfile
 import unittest
@@ -491,25 +490,6 @@ class TestUpdateGuard(_TempDataDir):
         st = al.build_status(state={"date": datetime.date.today().isoformat(), "used_seconds": 0}, games_now=[])
         self.assertIn("update_guard", st)
         self.assertEqual(st["update_guard"].get("ver"), "1.7.0")
-
-
-class TestDashboardExclusion(unittest.TestCase):
-    """Browser block pauses while the dashboard is open / just-opened."""
-
-    def setUp(self):
-        self._saved_ts = al._dashboard_opened_ts
-
-    def tearDown(self):
-        al._dashboard_opened_ts = self._saved_ts
-
-    def test_grace_window_pauses_block(self):
-        al._dashboard_opened_ts = time.time()
-        self.assertTrue(al.dashboard_block_pause())
-
-    def test_expired_grace_does_not_pause(self):
-        # No dashboard window on the test host, so only the (expired) grace matters.
-        al._dashboard_opened_ts = time.time() - (al.DASHBOARD_OPEN_GRACE_SEC + 30)
-        self.assertFalse(al.dashboard_block_pause())
 
 
 if __name__ == "__main__":
