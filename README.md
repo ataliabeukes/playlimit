@@ -376,10 +376,6 @@ On first run the dashboard asks for:
 Auto-refreshes (default 30 s). Because machines ship `status.json` every ~2 min,
 the dashboard is near-live; the full log tail still ships every 10 min.
 
-**Try it with no setup:** open `monitor/dashboard.html?demo=1` to see the layout
-rendered with three sample machines (playing / blocked / offline) — no repo or
-token needed. Handy for a quick look or for testing UI changes.
-
 ## Remote Logs (read all machines from this PC)
 
 Every running copy (v1.4.1+) uploads its log to the **private** repo
@@ -410,9 +406,6 @@ Pure-Python, run on any OS (they redirect state to a temp dir, never touching
 python3 -m unittest test_basic -v   # limits, state + sanitization, sessions, status, logging
 python3 test_matcher.py             # game-detection matcher contract
 ```
-
-The dashboard has a demo mode for a quick visual check — open
-`monitor/dashboard.html?demo=1` in any browser.
 
 ## Troubleshooting
 

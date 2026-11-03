@@ -72,5 +72,3 @@ Run before pushing:
 python3 -m unittest test_basic -v   # core logic
 python3 test_matcher.py             # game-detection matcher
 ```
-
-The dashboard (`monitor/dashboard.html`) has a `?demo=1` mode for a quick visual check.

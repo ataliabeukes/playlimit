@@ -172,89 +172,8 @@
 <script>
 const LS = "playlimit.monitor";
 const OFFLINE_AFTER_SEC = 360;      // 3 missed 2-min heartbeats => offline
-const DEMO = new URLSearchParams(location.search).has("demo");  // ?demo=1 -> sample data, no token
 let cfg = loadCfg();
 let timer = null;
-
-// Sample machines for ?demo=1 (lets you open the dashboard with no repo/token).
-function demoStats() {
-  const now = Math.floor(Date.now() / 1000);
-  const isoDaysAgo = n => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
-  // Build a 7-day series from a per-day map of {game: sec}.
-  const week = perDay => {
-    const days = [], pg = {}, pu = {};
-    let total = 0;
-    for (let i = 6; i >= 0; i--) {
-      const date = isoDaysAgo(i);
-      const per_game = perDay(6 - i) || {};
-      const dayTotal = Object.values(per_game).reduce((a, b) => a + b, 0);
-      days.push({ date, total_sec: dayTotal, per_game });
-      total += dayTotal;
-      for (const [k, v] of Object.entries(per_game)) pg[k] = (pg[k] || 0) + v;
-    }
-    return { total_sec: total, per_game: pg, per_user: pu, days };
-  };
-  const today = new Date().toISOString().slice(0, 10);
-  return [
-    {
-      schema: 1, host: "KIDS-PC", user: "ethan", version: "1.7.0",
-      heartbeat_epoch: now - 20, uptime_sec: 7320, date: today,
-      weekend: true, base_limit_sec: 7200, bonus_sec: 900, limit_sec: 8100,
-      used_sec: 5400, remaining_sec: 2700, disabled: false, blocked: false, warned: false,
-      playing: true, games_running: ["albion-online.exe"],
-      browser_allow_reason: "School IT class (Tuesday 08:00-13:30)",
-      sessions: [
-        { game: "roblox", start: "13:10", end: "13:55", user: "ethan" },
-        { game: "albion-online.exe", start: "14:30", end: null, user: "ethan" },
-      ],
-      psutil: true, browser_block: false, error_count: 0, warn_count: 2,
-      recent_issues: [{ ts: "2026-10-25T14:31:02", level: "WARN", msg: "LogShip: PUT status/KIDS-PC.json HTTP 409 retrying" }],
-      today: { total_sec: 5400, per_game: { "albion-online.exe": 3600, "roblox": 1800 }, per_user: { ethan: 5400 } },
-      week: week(d => [
-        { "roblox": 2400, "minecraft.windows.exe": 1800 },
-        { "albion-online.exe": 3600 },
-        { "(browser)": 2700 },
-        { "albion-online.exe": 2400, "fortnite": 1200 },
-        { "roblox": 3600 },
-        { "albion-online.exe": 1800, "(browser)": 900 },
-        { "albion-online.exe": 3600, "roblox": 1800 },
-      ][d]),
-    },
-    {
-      schema: 1, host: "LOUNGE-PC", user: "mia", version: "1.7.0",
-      heartbeat_epoch: now - 45, uptime_sec: 15300, date: today,
-      weekend: true, base_limit_sec: 7200, bonus_sec: 0, limit_sec: 7200,
-      used_sec: 7200, remaining_sec: 0, disabled: false, blocked: true, warned: true,
-      playing: true, games_running: ["minecraft.windows.exe"],
-      browser_allow_reason: null,
-      sessions: [{ game: "minecraft.windows.exe", start: "11:00", end: null, user: "mia" }],
-      psutil: true, browser_block: true, error_count: 1, warn_count: 0,
-      recent_issues: [{ ts: "2026-10-25T12:00:11", level: "ERROR", msg: "UNCAUGHT exception in thread 'TrayIcon'" }],
-      update_guard: { ver: "1.7.1", count: 2, reason: "staged exe reports v1.6.9, expected v1.7.1 (mislabeled/stale binary)", last_fail_ts: now - 600 },
-      today: { total_sec: 7200, per_game: { "minecraft.windows.exe": 7200 }, per_user: { mia: 7200 } },
-      week: week(d => [
-        { "minecraft.windows.exe": 3600 },
-        { "minecraft.windows.exe": 4800 },
-        { "minecraft.windows.exe": 3000, "(browser)": 600 },
-        {},
-        { "minecraft.windows.exe": 6000 },
-        { "minecraft.windows.exe": 4200 },
-        { "minecraft.windows.exe": 7200 },
-      ][d]),
-    },
-    {
-      schema: 1, host: "OLD-LAPTOP", user: "guest", version: "1.6.9",
-      heartbeat_epoch: now - 5400, uptime_sec: 300, date: today,
-      weekend: true, base_limit_sec: 7200, bonus_sec: 0, limit_sec: 7200,
-      used_sec: 600, remaining_sec: 6600, disabled: false, blocked: false, warned: false,
-      playing: false, games_running: [], sessions: [],
-      browser_allow_reason: null,
-      psutil: false, browser_block: true, error_count: 0, warn_count: 0, recent_issues: [],
-      today: { total_sec: 600, per_game: { "roblox": 600 }, per_user: { guest: 600 } },
-      week: week(d => [{}, { "roblox": 1200 }, {}, { "roblox": 600 }, {}, {}, { "roblox": 600 }][d]),
-    },
-  ];
-}
 
 function loadCfg() {
   try { return JSON.parse(localStorage.getItem(LS)) || {}; } catch { return {}; }
@@ -452,18 +371,6 @@ async function load() {
   const grid = document.getElementById("grid");
   const msg = document.getElementById("msg");
   msg.hidden = true;
-  if (DEMO) {
-    const stats = demoStats().sort((a, b) => (a.host || "").localeCompare(b.host || ""));
-    renderOverview(stats);
-    grid.innerHTML = stats.map(card).join("");
-    grid.querySelectorAll("[data-log]").forEach(b =>
-      b.onclick = () => viewLog(b.dataset.log, b.dataset.date));
-    const online = stats.filter(s => Date.now() / 1000 - (s.heartbeat_epoch || 0) <= OFFLINE_AFTER_SEC).length;
-    const playing = stats.filter(s => s.playing && !s.disabled).length;
-    document.getElementById("summary").textContent = `${stats.length} machine(s) · ${online} online · ${playing} playing · DEMO`;
-    document.getElementById("updated").textContent = "updated " + new Date().toLocaleTimeString();
-    return;
-  }
   try {
     let items;
     try {
@@ -516,14 +423,6 @@ async function viewLog(host, date) {
   const body = document.getElementById("log-body");
   body.textContent = "Loading…";
   dlg.showModal();
-  if (DEMO) {
-    body.textContent =
-      `# PlayLimit log | host=${host} | version=1.7.0 | DEMO\n` +
-      `[${date} 14:30:01] [INFO] GAME START albion-online.exe at 14:30\n` +
-      `[${date} 14:31:02] [WARN] LogShip: PUT status/${host}.json HTTP 409 retrying\n` +
-      `[${date} 14:45:00] [INFO] Playing... 45m / 135m used, 1h 30m remaining\n`;
-    return;
-  }
   try {
     body.textContent = await gh(`logs/${safe}-${date}.log`, { raw: true });
     body.scrollTop = body.scrollHeight;
@@ -566,7 +465,7 @@ document.getElementById("logout").onclick = () => showSetup();
 document.getElementById("interval").onchange = e => setInterval_(Number(e.target.value));
 document.getElementById("log-close").onclick = () => document.getElementById("logdlg").close();
 
-if (DEMO || (cfg.repo && cfg.token)) showApp(); else showSetup();
+if (cfg.repo && cfg.token) showApp(); else showSetup();
 </script>
 </body>
 </html>
